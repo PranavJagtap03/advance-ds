@@ -46,6 +46,12 @@ private:
     // Helper to destroy the tree
     void destroyTree(BPlusNode* node);
 
+    // Helper: search node and build traversal path (recursive)
+    // nodeIdx is an incrementing counter for naming internal nodes
+    FileNode* searchNodeWithPath(BPlusNode* node, string key,
+                                  string& path, int& hops,
+                                  int& nodeCounter);
+
 public:
     // Constructor initializes root
     BPlusTree();
@@ -76,4 +82,12 @@ public:
     
     // Displays the tree structure visually
     void display();
+
+    // ── NEW: returns the found FileNode* plus a human-readable traversal path.
+    // Path format: "root->nodeN->...->leafM  [H hops]"
+    pair<FileNode*, string> searchWithPath(string key);
+
+    // ── NEW: range search that also returns traversal path per result.
+    // Each pair: {FileNode, path_string}
+    vector<pair<FileNode*, string>> rangeSearchWithPath(string k1, string k2);
 };

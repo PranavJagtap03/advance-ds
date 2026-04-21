@@ -1,0 +1,34 @@
+# Binaries and executables
+fsm.exe
+fsm
+*.exe
+*.out
+*.app
+
+# Object files and libraries
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.lib
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.pdb
+*.ilk
+*.exp
+
+# Local environment/database
+*.db
+*.sqlite

@@ -95,3 +95,42 @@ void Trie::remove(string filename) {
         curr->fileId = -1;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 8. prefixSearchWithPath(prefix) — new additive method
+//    Walks the trie character by character, building a path string
+//    like "b->u->d->g->e->t", then collects all matches.
+//    Returns {matched_filenames, character_path_string}.
+// ─────────────────────────────────────────────────────────────────────
+pair<vector<string>, string> Trie::prefixSearchWithPath(string prefix) {
+    vector<string> matched;
+    string path;
+
+    if (!root || prefix.empty()) {
+        // Empty prefix: collect everything, path is just "(root)"
+        path = "(root)";
+        collectAll(root, "", matched);
+        return {matched, path};
+    }
+
+    TrieNode* curr = root;
+
+    // Walk trie following prefix chars, building the path
+    for (int i = 0; i < (int)prefix.size(); i++) {
+        char c = prefix[i];
+        if (curr->children.find(c) == curr->children.end()) {
+            // Character not found — path shows how far we got
+            if (!path.empty()) path += "->";
+            path += string(1, c) + "(NOT_FOUND)";
+            return {matched, path}; // empty matched
+        }
+        if (!path.empty()) path += "->";
+        path += string(1, c);
+        curr = curr->children[c];
+    }
+
+    // Collect all filenames reachable from the node we landed on
+    collectAll(curr, prefix, matched);
+
+    return {matched, path};
+}

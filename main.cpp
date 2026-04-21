@@ -5,10 +5,22 @@
 #include "UnionFind.h"
 #include "DataGenerator.h"
 #include "Features.h"
+#include "QueryAnalyzer.h"
 #include <iostream>
 #include <string>
 #include <iomanip>
 #include <vector>
+#include <sstream>
+#include <algorithm>
+#include <ctime>
+
+// Platform-specific directory traversal
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <dirent.h>
+    #include <sys/stat.h>
+#endif
 
 using namespace std;
 
@@ -24,7 +36,7 @@ vector<int> allFileIds;
 int nextFileId = 10000;
 
 // ═══════════════════════════════════
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS  (menu mode only)
 // ═══════════════════════════════════
 
 void printSeparator() {
@@ -76,7 +88,7 @@ void printMenu() {
 }
 
 // ═══════════════════════════════════
-// FEATURE FUNCTIONS
+// FEATURE FUNCTIONS  (menu mode)
 // ═══════════════════════════════════
 
 void addFile() {
@@ -312,10 +324,592 @@ void showSystemInfo() {
     cout << "Files with version history: " << filesWithHistory << endl;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// MACHINE MODE — LOAD_DIR implementation
+// ═══════════════════════════════════════════════════════════════════
+
+// Returns {count_loaded, total_bytes}
+pair<int,long> loadDirectory(const string& dirPath) {
+    int count = 0;
+    long totalBytes = 0;
+
+    // Folder nodes in UnionFind
+    uf.addNode(0);
+    uf.addNode(1); uf.unite(1, 0);
+    uf.addNode(2); uf.unite(2, 0);
+    uf.addNode(3); uf.unite(3, 0);
+    uf.addNode(4); uf.unite(4, 0);
+
+#ifdef _WIN32
+    // Windows: use FindFirstFile / FindNextFile
+    string pattern = dirPath + "\\*";
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA(pattern.c_str(), &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return {count, totalBytes};
+
+    do {
+        string fname = ffd.cFileName;
+        if (fname == "." || fname == "..") continue;
+
+        string fullPath = dirPath + "\\" + fname;
+
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            // Recurse
+            auto sub = loadDirectory(fullPath);
+            count     += sub.first;
+            totalBytes += sub.second;
+        } else {
+            // File
+            LARGE_INTEGER sz;
+            sz.LowPart  = ffd.nFileSizeLow;
+            sz.HighPart = (LONG)ffd.nFileSizeHigh;
+            long fileSize = (long)sz.QuadPart;
+
+            int id = nextFileId++;
+            int parentId = 1; // assign to /documents by default
+            long ts = (long)time(0);
+
+            FileNode f(fname, fullPath, parentId, fileSize, ts);
+            f.id = id;
+            f.modifiedAt = ts;
+
+            bpt.insert(fname, f);
+            trie.insert(fname, f.id);
+            int dayIndex = (ts / 86400) % 365;
+            segTree.addFile(dayIndex, f.size);
+            uf.addNode(f.id);
+            uf.unite(f.id, f.parentId);
+            pds.saveVersion(f);
+            allFileIds.push_back(f.id);
+
+            count++;
+            totalBytes += fileSize;
+        }
+    } while (FindNextFileA(hFind, &ffd) != 0);
+
+    FindClose(hFind);
+
+#else
+    // POSIX: use opendir/readdir
+    DIR* dir = opendir(dirPath.c_str());
+    if (!dir) return {count, totalBytes};
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        string fname = entry->d_name;
+        if (fname == "." || fname == "..") continue;
+
+        string fullPath = dirPath + "/" + fname;
+
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            auto sub = loadDirectory(fullPath);
+            count     += sub.first;
+            totalBytes += sub.second;
+        } else {
+            long fileSize = (long)st.st_size;
+            int id = nextFileId++;
+            int parentId = 1;
+            long ts = (long)time(0);
+
+            FileNode f(fname, fullPath, parentId, fileSize, ts);
+            f.id = id;
+            f.modifiedAt = ts;
+
+            bpt.insert(fname, f);
+            trie.insert(fname, f.id);
+            int dayIndex = (ts / 86400) % 365;
+            segTree.addFile(dayIndex, f.size);
+            uf.addNode(f.id);
+            uf.unite(f.id, f.parentId);
+            pds.saveVersion(f);
+            allFileIds.push_back(f.id);
+
+            count++;
+            totalBytes += fileSize;
+        }
+    }
+    closedir(dir);
+#endif
+
+    return {count, totalBytes};
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MACHINE MODE — command processor
+// ═══════════════════════════════════════════════════════════════════
+
+// Month name mapping for output
+static const string MONTH_NAMES[12] = {
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December"
+};
+static const int MONTH_START_DAYS[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+static const int MONTH_END_DAYS[12]   = {30,58,89,119,150,180,211,242,272,303,333,364};
+
+// Join a vector of strings with a delimiter
+static string joinStrings(const vector<string>& v, char delim = ',') {
+    string s;
+    for (int i = 0; i < (int)v.size(); i++) {
+        if (i > 0) s += delim;
+        s += v[i];
+    }
+    return s;
+}
+
+// Sanitise a pipe-unsafe string (replace | with _)
+static string safe(const string& s) {
+    string r = s;
+    for (char& c : r) if (c == '|') c = '_';
+    return r;
+}
+
+void runMachineMode() {
+    string line;
+    while (getline(cin, line)) {
+        // Trim trailing \r on Windows
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        istringstream iss(line);
+        string cmd;
+        iss >> cmd;
+
+        // ── EXIT ────────────────────────────────────────────────────
+        if (cmd == "EXIT") {
+            cout << "BYE" << endl << flush;
+            return;
+        }
+
+        // ── LOAD_DIR <path> ─────────────────────────────────────────
+        else if (cmd == "LOAD_DIR") {
+            string path;
+            getline(iss >> ws, path);
+            if (path.empty()) {
+                cout << "ERROR|LOAD_DIR|no path provided" << endl << flush;
+                continue;
+            }
+            try {
+                pair<int,long> ldResult = loadDirectory(path);
+                cout << "LOADED|" << ldResult.first << "|" << ldResult.second << endl << flush;
+            } catch (...) {
+                cout << "ERROR|LOAD_DIR|exception during directory scan" << endl << flush;
+            }
+        }
+
+        // ── LOAD_RECORD <name>|<path>|<size_bytes>|<modified_ts> ────
+        // Inserts a pre-scanned file record directly — no filesystem walk.
+        // Used by the Python GUI to replay the SQLite cache on startup.
+        else if (cmd == "LOAD_RECORD") {
+            string rest;
+            getline(iss >> ws, rest);
+            // Parse pipe-delimited fields
+            vector<string> fields;
+            stringstream ss2(rest);
+            string tok;
+            while (getline(ss2, tok, '|')) fields.push_back(tok);
+            if (fields.size() < 2) {
+                cout << "ERROR|LOAD_RECORD|need name|path" << endl << flush;
+                continue;
+            }
+            string fname    = fields[0];
+            string fpath    = fields[1];
+            long   fsize    = fields.size() > 2 ? stol(fields[2]) : 0;
+            long   fmod     = fields.size() > 3 ? stol(fields[3]) : 0;
+
+            FileNode node(fname, fpath, 0, fsize, fmod);
+            node.id         = nextFileId++;
+            node.modifiedAt = fmod;
+            node.checksum   = to_string(fsize) + fname.substr(0, min(3, (int)fname.size()));
+
+            bpt.insert(fname, node);
+            trie.insert(fname, node.id);
+            if (fmod > 0) {
+                struct tm* t = localtime(&fmod);
+                if (t) {
+                    int day = t->tm_yday + 1;
+                    segTree.addFile(day, fsize / 1024);
+                }
+            }
+            allFileIds.push_back(node.id);
+            cout << "REC_OK|" << node.id << endl << flush;
+        }
+
+        // ── LOAD_BATCH_BEGIN / LOAD_BATCH_END ────────────────────────
+        // Accepts many LOAD_RECORD lines bracketed by these markers.
+        // Returns BATCH_DONE|count at the end.
+        else if (cmd == "LOAD_BATCH_BEGIN") {
+            int batchCount = 0;
+            string bline;
+            while (getline(cin, bline)) {
+                if (!bline.empty() && bline.back() == '\r') bline.pop_back();
+                if (bline == "LOAD_BATCH_END") break;
+                // Each line is: name|path|size|modified
+                vector<string> fields;
+                stringstream ss3(bline);
+                string tok3;
+                while (getline(ss3, tok3, '|')) fields.push_back(tok3);
+                if (fields.size() < 2) continue;
+                string fname = fields[0];
+                string fpath = fields[1];
+                long fsize   = fields.size() > 2 ? stol(fields[2]) : 0;
+                long fmod    = fields.size() > 3 ? stol(fields[3]) : 0;
+                FileNode node(fname, fpath, 0, fsize, fmod);
+                node.id  = nextFileId++;
+                node.modifiedAt = fmod;
+                node.checksum = to_string(fsize) + fname.substr(0, min(3, (int)fname.size()));
+                bpt.insert(fname, node);
+                trie.insert(fname, node.id);
+                if (fmod > 0) {
+                    struct tm* t = localtime(&fmod);
+                    if (t) {
+                        int day = t->tm_yday + 1;
+                        segTree.addFile(day, fsize / 1024);
+                    }
+                }
+                allFileIds.push_back(node.id);
+                batchCount++;
+            }
+            cout << "BATCH_DONE|" << batchCount << endl << flush;
+        }
+
+        // ── GENERATE <count> ────────────────────────────────────────
+        else if (cmd == "GENERATE") {
+            int n = 0;
+            iss >> n;
+            if (n <= 0) {
+                cout << "ERROR|GENERATE|invalid count" << endl << flush;
+                continue;
+            }
+            // Suppress generateData()'s cout by redirecting stdout temporarily
+            // We simply call it and ignore its prints (they go to stdout pre-flush).
+            // Since machine mode must not print banners, we redirect.
+            // Simplest safe approach: call generateData and let its prints happen
+            // (they are informational messages during generation).
+            // Per spec: output only the final structured line.
+            // We save/restore cout stream buffer.
+            streambuf* oldBuf = cout.rdbuf(nullptr); // suppress generateData output
+            generateData(n);
+            cout.rdbuf(oldBuf); // restore
+            cout << "GENERATED|" << n << endl << flush;
+        }
+
+        // ── SEARCH <filename> ────────────────────────────────────────
+        else if (cmd == "SEARCH") {
+            string filename;
+            iss >> filename;
+            if (filename.empty()) {
+                cout << "ERROR|SEARCH|no filename provided" << endl << flush;
+                continue;
+            }
+
+            QueryResult qr = classify(filename);
+            pair<FileNode*, string> swpResult = bpt.searchWithPath(filename);
+            FileNode* node  = swpResult.first;
+            string    tpath = swpResult.second;
+
+            // Count hops from path string
+            int hops = 0;
+            {
+                size_t pos = tpath.find('[');
+                if (pos != string::npos) {
+                    sscanf(tpath.c_str() + pos + 1, "%d", &hops);
+                }
+            }
+
+            if (node) {
+                cout << "RESULT|FOUND"
+                     << "|" << safe(node->name)
+                     << "|" << safe(node->path)
+                     << "|" << node->size / 1024
+                     << "|" << qr.dsName
+                     << "|" << safe(tpath)
+                     << "|" << hops
+                     << "|" << safe(qr.reason)
+                     << endl << flush;
+            } else {
+                cout << "RESULT|NOT_FOUND"
+                     << "|" << safe(filename)
+                     << "|" << qr.dsName
+                     << "|" << hops
+                     << "|" << safe(qr.reason)
+                     << endl << flush;
+            }
+        }
+
+        // ── PREFIX <prefix> ─────────────────────────────────────────
+        else if (cmd == "PREFIX") {
+            string prefix;
+            iss >> prefix;
+            if (prefix.empty()) {
+                cout << "ERROR|PREFIX|no prefix provided" << endl << flush;
+                continue;
+            }
+
+            pair<vector<string>, string> pswpResult = trie.prefixSearchWithPath(prefix);
+            vector<string> names = pswpResult.first;
+            string         tpath = pswpResult.second;
+            QueryResult qr = classify(prefix + "*");
+
+            cout << "RESULT|PREFIX"
+                 << "|" << joinStrings(names)
+                 << "|" << safe(tpath)
+                 << "|" << names.size()
+                 << "|" << safe(qr.reason)
+                 << endl << flush;
+        }
+
+        // ── SIZE_RANGE <min_kb> <max_kb> ─────────────────────────────
+        else if (cmd == "SIZE_RANGE") {
+            long minKB = 0, maxKB = 0;
+            if (!(iss >> minKB >> maxKB) || minKB < 0 || maxKB < 0) {
+                cout << "ERROR|SIZE_RANGE|invalid arguments" << endl << flush;
+                continue;
+            }
+
+            vector<FileNode> results = bpt.searchBySize(minKB * 1024, maxKB * 1024);
+            vector<string> names;
+            for (const auto& f : results) names.push_back(f.name);
+
+            QueryResult qr = classify("size:" + to_string(minKB) + "-" + to_string(maxKB));
+
+            cout << "RESULT|SIZE"
+                 << "|" << joinStrings(names)
+                 << "|" << results.size()
+                 << "|SegmentTree"
+                 << "|" << safe(qr.reason)
+                 << endl << flush;
+        }
+
+        // ── DATE_RANGE <month_start> <month_end> ─────────────────────
+        else if (cmd == "DATE_RANGE") {
+            int m1 = 0, m2 = 0;
+            if (!(iss >> m1 >> m2) || m1 < 1 || m1 > 12 || m2 < 1 || m2 > 12 || m1 > m2) {
+                cout << "ERROR|DATE_RANGE|month values must be 1-12 and start<=end" << endl << flush;
+                continue;
+            }
+
+            int dayStart = MONTH_START_DAYS[m1 - 1];
+            int dayEnd   = MONTH_END_DAYS[m2 - 1];
+            long bytes   = segTree.queryRange(dayStart, dayEnd);
+            double mb    = bytes / 1048576.0;
+
+            cout << "RESULT|DATE"
+                 << "|" << fixed << setprecision(2) << mb
+                 << "|" << m1
+                 << "|" << m2
+                 << "|SegmentTree"
+                 << endl << flush;
+        }
+
+        // ── DUPLICATES ───────────────────────────────────────────────
+        else if (cmd == "DUPLICATES") {
+            vector<FileNode> all = bpt.getAllLeaves();
+            map<string, vector<FileNode>> groups;
+            for (const auto& f : all) groups[f.checksum].push_back(f);
+
+            int groupCount = 0;
+            double totalWastedMB = 0.0;
+
+            for (const auto& kv : groups) {
+                if (kv.second.size() <= 1) continue;
+                groupCount++;
+                const auto& files = kv.second;
+                long wastedKB = (long)(files.size() - 1) * files[0].size / 1024;
+                totalWastedMB += wastedKB / 1024.0;
+
+                vector<string> paths;
+                for (const auto& f : files) paths.push_back(f.path);
+
+                cout << "DUP"
+                     << "|" << safe(files[0].name)
+                     << "|" << safe(kv.first)
+                     << "|" << joinStrings(paths)
+                     << "|" << wastedKB
+                     << endl << flush;
+            }
+
+            cout << "DUP_DONE"
+                 << "|" << groupCount
+                 << "|" << fixed << setprecision(2) << totalWastedMB
+                 << endl << flush;
+        }
+
+        // ── ORPHANS ───────────────────────────────────────────────────
+        else if (cmd == "ORPHANS") {
+            vector<int> orphans = uf.findAllOrphans(0, allFileIds);
+            vector<FileNode> allLeaves = bpt.getAllLeaves();
+            long totalSize = 0;
+
+            for (int id : orphans) {
+                for (const auto& f : allLeaves) {
+                    if (f.id == id) {
+                        cout << "ORPHAN"
+                             << "|" << f.id
+                             << "|" << safe(f.name)
+                             << "|" << safe(f.path)
+                             << "|" << f.size / 1024
+                             << endl << flush;
+                        totalSize += f.size;
+                        break;
+                    }
+                }
+            }
+
+            cout << "ORPHAN_DONE"
+                 << "|" << orphans.size()
+                 << "|" << fixed << setprecision(2) << (totalSize / 1048576.0)
+                 << endl << flush;
+        }
+
+        // ── ANALYTICS ─────────────────────────────────────────────────
+        else if (cmd == "ANALYTICS") {
+            double totalMB = 0.0;
+            for (int i = 0; i < 12; i++) {
+                long bytes = segTree.queryRange(MONTH_START_DAYS[i], MONTH_END_DAYS[i]);
+                double mb = bytes / 1048576.0;
+                totalMB += mb;
+                cout << "MONTH"
+                     << "|" << MONTH_NAMES[i]
+                     << "|" << fixed << setprecision(2) << mb
+                     << endl << flush;
+            }
+            cout << "ANALYTICS_DONE"
+                 << "|" << fixed << setprecision(2) << totalMB
+                 << endl << flush;
+        }
+
+        // ── VERSION_HISTORY <file_id> ─────────────────────────────────
+        else if (cmd == "VERSION_HISTORY") {
+            int fid = -1;
+            iss >> fid;
+            if (fid < 0) {
+                cout << "ERROR|VERSION_HISTORY|invalid file id" << endl << flush;
+                continue;
+            }
+            if (!pds.hasHistory(fid)) {
+                cout << "VERSION_DONE|0" << endl << flush;
+                continue;
+            }
+
+            int count = 0;
+            // Access versions via getVersion(fid, verNum) — iterate until not found
+            for (int v = 1; ; v++) {
+                FileNode fn = pds.getVersion(fid, v);
+                if (fn.id == -1) break;
+                cout << "VERSION"
+                     << "|" << fid
+                     << "|" << v
+                     << "|" << fn.size / 1024
+                     << "|" << fn.modifiedAt
+                     << endl << flush;
+                count++;
+            }
+            cout << "VERSION_DONE|" << count << endl << flush;
+        }
+
+        // ── BENCHMARK ─────────────────────────────────────────────────
+        else if (cmd == "BENCHMARK") {
+            using namespace std::chrono;
+
+            // Suppress generateData output during benchmark
+            streambuf* oldBuf = cout.rdbuf(nullptr);
+            generateData(10000);
+            cout.rdbuf(oldBuf);
+
+            vector<FileNode> all = bpt.getAllLeaves();
+            if (all.empty()) {
+                cout << "ERROR|BENCHMARK|no data available" << endl << flush;
+                continue;
+            }
+
+            // TEST 1 — Search
+            auto t0 = high_resolution_clock::now();
+            for (int i = 0; i < 1000; i++) bpt.search(all[rand() % all.size()].name);
+            auto t1 = high_resolution_clock::now();
+            long bptSearch = duration_cast<microseconds>(t1 - t0).count();
+
+            t0 = high_resolution_clock::now();
+            for (int i = 0; i < 1000; i++) {
+                string sn = all[rand() % all.size()].name;
+                for (const auto& f : all) { if (f.name == sn) break; }
+            }
+            t1 = high_resolution_clock::now();
+            long linSearch = duration_cast<microseconds>(t1 - t0).count();
+
+            double sp1 = bptSearch > 0 ? (double)linSearch / bptSearch : 0.0;
+            cout << "BENCH|Search(1000ops)|" << bptSearch << "|" << linSearch
+                 << "|" << fixed << setprecision(2) << sp1 << endl << flush;
+
+            // TEST 2 — Range search
+            t0 = high_resolution_clock::now();
+            for (int i = 0; i < 100; i++) bpt.rangeSearch("a", "m");
+            t1 = high_resolution_clock::now();
+            long bptRange = duration_cast<microseconds>(t1 - t0).count();
+
+            t0 = high_resolution_clock::now();
+            for (int i = 0; i < 100; i++) {
+                vector<FileNode> r;
+                for (const auto& f : all) if (f.name >= "a" && f.name <= "m") r.push_back(f);
+            }
+            t1 = high_resolution_clock::now();
+            long linRange = duration_cast<microseconds>(t1 - t0).count();
+
+            double sp2 = bptRange > 0 ? (double)linRange / bptRange : 0.0;
+            cout << "BENCH|Range(100ops)|" << bptRange << "|" << linRange
+                 << "|" << fixed << setprecision(2) << sp2 << endl << flush;
+
+            // TEST 3 — Prefix search
+            t0 = high_resolution_clock::now();
+            for (int i = 0; i < 1000; i++) trie.prefixSearch("rep");
+            t1 = high_resolution_clock::now();
+            long triePrefix = duration_cast<microseconds>(t1 - t0).count();
+
+            t0 = high_resolution_clock::now();
+            for (int i = 0; i < 1000; i++) {
+                vector<FileNode> r;
+                for (const auto& f : all) if (f.name.size() >= 3 && f.name.substr(0,3) == "rep") r.push_back(f);
+            }
+            t1 = high_resolution_clock::now();
+            long linPrefix = duration_cast<microseconds>(t1 - t0).count();
+
+            double sp3 = triePrefix > 0 ? (double)linPrefix / triePrefix : 0.0;
+            cout << "BENCH|Prefix(1000ops)|" << triePrefix << "|" << linPrefix
+                 << "|" << fixed << setprecision(2) << sp3 << endl << flush;
+
+            cout << "BENCH_DONE" << endl << flush;
+        }
+
+        // ── UNKNOWN ───────────────────────────────────────────────────
+        else {
+            cout << "ERROR|" << safe(cmd) << "|unknown command" << endl << flush;
+        }
+    }
+}
+
 // ═══════════════════════════════════
 // MAIN FUNCTION
 // ═══════════════════════════════════
-int main() {
+int main(int argc, char* argv[]) {
+    // Check for --machine flag
+    bool machineMode = false;
+    for (int i = 1; i < argc; i++) {
+        if (string(argv[i]) == "--machine") {
+            machineMode = true;
+            break;
+        }
+    }
+
+    if (machineMode) {
+        // Suppress all DS couts in machine mode by redirecting stderr-only
+        // (generateData / pds.saveVersion print to cout — handled per command)
+        runMachineMode();
+        return 0;
+    }
+
+    // ── Normal menu mode (unchanged behaviour) ───────────────────────
     printBanner();
     cout << "Welcome! Type 11 to generate test data first." << endl;
     

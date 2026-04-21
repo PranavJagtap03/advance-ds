@@ -44,4 +44,9 @@ public:
     
     // Removes a filename from the trie
     void remove(string filename);
+
+    // ── NEW: prefixSearchWithPath(prefix)
+    // Returns {matched_filenames, character_path_string}
+    // Character path format: "b->u->d->g->e->t"
+    pair<vector<string>, string> prefixSearchWithPath(string prefix);
 };

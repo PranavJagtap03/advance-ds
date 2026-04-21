@@ -1,6 +1,7 @@
 #include "BPlusTree.h"
 #include <iostream>
 #include <queue>
+#include <sstream>
 
 // 1. Constructor — root is instantiated as a newly created leaf node.
 BPlusTree::BPlusTree() {
@@ -294,4 +295,117 @@ void BPlusTree::display() {
         cout << endl; // next line for new depth
         level++;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 16. searchNodeWithPath — private recursive helper
+//     Traverses the tree just like searchNode() but appends node labels
+//     to 'path' and increments 'hops' at every level descent.
+// ─────────────────────────────────────────────────────────────────────
+FileNode* BPlusTree::searchNodeWithPath(BPlusNode* node, string key,
+                                         string& path, int& hops,
+                                         int& nodeCounter) {
+    if (!node) return nullptr;
+
+    // Label this node
+    string label;
+    if (node == root) {
+        label = "root";
+    } else if (node->isLeaf) {
+        label = "leaf" + to_string(nodeCounter++);
+    } else {
+        label = "node" + to_string(nodeCounter++);
+    }
+
+    // Append to path
+    if (!path.empty()) path += "->";
+    path += label;
+
+    int i = 0;
+    while (i < (int)node->keys.size() && key > node->keys[i]) {
+        i++;
+    }
+
+    if (node->isLeaf) {
+        hops++;
+        if (i < (int)node->keys.size() && node->keys[i] == key) {
+            return &(node->values[i]);
+        }
+        return nullptr;
+    } else {
+        if (i < (int)node->keys.size() && node->keys[i] == key) {
+            i++;
+        }
+        hops++;
+        return searchNodeWithPath(node->children[i], key, path, hops, nodeCounter);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 17. searchWithPath(key) — public
+//     Returns {FileNode*, traversal_path_with_hop_count}
+// ─────────────────────────────────────────────────────────────────────
+pair<FileNode*, string> BPlusTree::searchWithPath(string key) {
+    if (!root) return {nullptr, "empty_tree"};
+
+    string path;
+    int hops = 0;
+    int nodeCounter = 1; // counter for naming non-root nodes
+
+    FileNode* result = searchNodeWithPath(root, key, path, hops, nodeCounter);
+
+    // Append hop count to the path string
+    path += "  [" + to_string(hops) + " hop" + (hops == 1 ? "" : "s") + "]";
+
+    return {result, path};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 18. rangeSearchWithPath(k1, k2) — public
+//     Performs leaf-chain range scan and returns path taken to the first
+//     leaf, together with all matched FileNodes.
+// ─────────────────────────────────────────────────────────────────────
+vector<pair<FileNode*, string>> BPlusTree::rangeSearchWithPath(string k1, string k2) {
+    vector<pair<FileNode*, string>> result;
+    if (!root) return result;
+
+    // Build traversal path down to the start leaf
+    string path;
+    int hops = 0;
+    int nodeCounter = 1;
+
+    BPlusNode* curr = root;
+
+    // Traverse internal nodes, recording path
+    while (!curr->isLeaf) {
+        string label = (curr == root) ? "root" : "node" + to_string(nodeCounter++);
+        if (!path.empty()) path += "->";
+        path += label;
+
+        int i = 0;
+        while (i < (int)curr->keys.size() && k1 > curr->keys[i]) i++;
+        curr = curr->children[i];
+        hops++;
+    }
+
+    // Record the first leaf
+    string leafLabel = "leaf" + to_string(nodeCounter++);
+    if (!path.empty()) path += "->";
+    path += leafLabel;
+    hops++;
+
+    string basePath = path + "  [" + to_string(hops) + " hop" + (hops == 1 ? "" : "s") + "]";
+
+    // Walk the leaf linked list collecting results
+    while (curr) {
+        for (int i = 0; i < (int)curr->keys.size(); i++) {
+            if (curr->keys[i] >= k1 && curr->keys[i] <= k2) {
+                result.push_back({&(curr->values[i]), basePath});
+            } else if (curr->keys[i] > k2) {
+                return result;
+            }
+        }
+        curr = curr->next;
+    }
+    return result;
 }
