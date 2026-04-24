@@ -3,9 +3,7 @@
 #include "SegmentTree.h"
 #include "PersistentDS.h"
 #include "UnionFind.h"
-#include "DataGenerator.h"
 #include "Features.h"
-#include "QueryAnalyzer.h"
 #include <iostream>
 #include <string>
 #include <iomanip>
@@ -223,6 +221,39 @@ void runMachineMode() {
         string cmd; iss >> cmd;
 
         if (cmd == "EXIT") { cout << "BYE" << endl << flush; return; }
+        else if (cmd == "LOAD_BATCH_BEGIN") {
+            int count = 0;
+            string batchLine;
+            while (getline(cin, batchLine)) {
+                if (!batchLine.empty() && batchLine.back() == '\r') batchLine.pop_back();
+                if (batchLine == "LOAD_BATCH_END") break;
+                istringstream biss(batchLine);
+                string fname, pdir, sz_str, mt_str;
+                if(getline(biss, fname, '|') && getline(biss, pdir, '|') && getline(biss, sz_str, '|') && getline(biss, mt_str)) {
+                    long sz = stol(sz_str);
+                    long mt = stol(mt_str);
+                    int parentId = 0;
+                    if(directoryIds.find(pdir) != directoryIds.end()) {
+                        parentId = directoryIds[pdir];
+                    } else {
+                        parentId = nextDirId++;
+                        directoryIds[pdir] = parentId;
+                        uf.addNode(parentId);
+                        uf.unite(parentId, 0);
+                    }
+                    int id = nextFileId++;
+                    FileNode f(fname, pdir + "/" + fname, parentId, sz, mt);
+                    f.id = id; f.modifiedAt = mt;
+                    bpt.insert(fname, f); trie.insert(fname, id);
+                    struct tm* ti = localtime(&mt);
+                    if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+                    uf.addNode(id); uf.unite(id, parentId);
+                    pds.saveVersion(f); allFileIds.push_back(id);
+                    count++;
+                }
+            }
+            cout << "BATCH_DONE|" << count << endl << flush;
+        }
         else if (cmd == "DISK_INFO") { sendDiskInfo(scanRoot); }
         else if (cmd == "SNAPSHOT") {
             vector<FileNode> all = bpt.getAllLeaves();
@@ -299,6 +330,13 @@ void runMachineMode() {
             if(!found) cout << "ERROR|DELETE|not_found" << endl;
             cout << flush;
         }
+        else if (cmd == "DUMP_CACHE") {
+            vector<FileNode> all = bpt.getAllLeaves();
+            for (const auto& f : all) {
+                cout << "CACHE_ITEM|" << safe(f.name) << "|" << safe(f.path) << "|" << f.size << "|" << f.modifiedAt << endl;
+            }
+            cout << "CACHE_DONE" << endl << flush;
+        }
         else if (cmd == "LOAD_DIR") {
             string path; getline(iss >> ws, path);
             if (path.empty()) { cout << "ERROR|LOAD_DIR|no path" << endl << flush; continue; }
@@ -311,10 +349,21 @@ void runMachineMode() {
             else cout << "ROLLBACK_ERROR|failed" << endl << flush;
         }
         else if (cmd == "SEARCH") {
-            string filename; iss >> filename;
+            string filename; getline(iss >> ws, filename);
             FileNode* node = bpt.search(filename);
             if (node) cout << "RESULT|FOUND|" << safe(node->name) << "|" << safe(node->path) << "|" << node->size / 1024 << "|Engine|" << safe(node->path) << "|0|Direct" << endl << flush;
             else cout << "RESULT|NOT_FOUND|" << safe(filename) << "|||Engine||0|Direct" << endl << flush;
+        }
+        else if (cmd == "PREFIX") {
+            string prefix; getline(iss >> ws, prefix);
+            vector<string> results = trie.prefixSearch(prefix);
+            if (!results.empty()) {
+                string resultStr = "";
+                for (const auto& name : results) resultStr += safe(name) + ",";
+                cout << "RESULT|PREFIX|" << resultStr << "|||Engine||0|Direct" << endl << flush;
+            } else {
+                cout << "RESULT|NOT_FOUND|" << safe(prefix) << "|||Engine||0|Direct" << endl << flush;
+            }
         }
         else if (cmd == "DUPLICATES") {
             vector<FileNode> all = bpt.getAllLeaves();
@@ -351,7 +400,7 @@ void runMachineMode() {
             cout << "ANALYTICS_DONE|0" << endl << flush;
         }
         else if (cmd == "VERSION_HISTORY") {
-            int fid; iss >> fid;
+            int fid; if (!(iss >> fid)) { cout << "VERSION_DONE|0" << endl << flush; continue; }
             for (int v = 1; ; v++) {
                 FileNode fn = pds.getVersion(fid, v);
                 if (fn.id == -1) break;

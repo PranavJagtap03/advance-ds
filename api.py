@@ -97,11 +97,12 @@ class FileCache:
 class SubprocessBridge:
     TERMINATORS = {"DUP_DONE", "ORPHAN_DONE", "ANALYTICS_DONE",
                    "BENCH_DONE", "VERSION_DONE", "BYE", "BATCH_DONE", "REC_OK", "LOADED",
-                   "ROLLBACK_OK", "ROLLBACK_ERROR"}
+                   "ROLLBACK_OK", "ROLLBACK_ERROR", "CACHE_DONE"}
 
     def __init__(self):
         self.proc = None
         self._lock = threading.Lock()
+        self.cache_buffer = []
         self._start_process()
         self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self.reader_thread.start()
@@ -159,6 +160,17 @@ class SubprocessBridge:
             parts = line.split("|")
             prefix = parts[0]
             
+            if prefix == "CACHE_ITEM" and len(parts) >= 5:
+                # CACHE_ITEM|fname|path|size|mtime
+                self.cache_buffer.append((parts[1], parts[2], int(parts[3]), int(parts[4])))
+                continue
+
+            if prefix == "CACHE_DONE":
+                if cache and self.cache_buffer:
+                    cache.save_scan_results("root", self.cache_buffer)
+                    self.cache_buffer = []
+                # No break/return, continue to broadcast CACHE_DONE if needed
+            
             # Map engine output to specific tags or just broadcast as global
             # For the current frontend, we'll broadcast as 'engine_stream'
             # We can try to guess the tag based on prefix, but broadcasting to 'global'
@@ -178,6 +190,8 @@ class SubprocessBridge:
             if prefix in ("LOADED", "BATCH_DONE", "REC_OK"):
                 target_tags.append("explorer")
                 target_tags.append("global_status")
+                if prefix == "LOADED":
+                    self.send("DUMP_CACHE")
 
             for t in target_tags:
                 self._broadcast_threadsafe("engine_stream", {"tag": t, "line": line})

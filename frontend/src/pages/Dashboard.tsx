@@ -21,6 +21,16 @@ const Dashboard = () => {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     };
 
+    const calculateWaste = () => {
+        if (!warnings || warnings.length === 0) return '0 MB';
+        let total = 0;
+        warnings.forEach(w => {
+            const match = w.message.match(/(\d+)\s+MB/);
+            if (match) total += parseInt(match[1]);
+        });
+        return total > 0 ? `${total} MB` : '0 MB';
+    };
+
     return (
         <div className="flex flex-col gap-6">
             <header className="mb-4">
@@ -133,7 +143,7 @@ const Dashboard = () => {
                     </div>
                     <div>
                         <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Potential Waste</p>
-                        <h4 className="text-2xl font-black text-on-surface">500MB+</h4>
+                        <h4 className="text-2xl font-black text-on-surface">{calculateWaste()}</h4>
                     </div>
                 </div>
             </div>

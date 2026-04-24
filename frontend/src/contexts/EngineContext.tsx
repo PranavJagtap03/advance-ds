@@ -101,7 +101,7 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                         });
                     }
 
-                    if (line.startsWith('WARN')) {
+                    if (line.startsWith('WARN|')) {
                         const parts = line.split('|');
                         setWarnings(prev => [...prev, { type: parts[1], message: parts[2] }]);
                     }
