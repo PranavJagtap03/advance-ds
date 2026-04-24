@@ -8,7 +8,8 @@ import {
     LineChart, 
     History, 
     Settings as SettingsIcon,
-    Database
+    Database,
+    ShieldAlert
 } from 'lucide-react';
 
 const AppLayout = () => {
@@ -21,6 +22,7 @@ const AppLayout = () => {
         { path: '/orphans', label: 'Broken Links', icon: Link2Off },
         { path: '/analytics', label: 'Storage Trends', icon: LineChart },
         { path: '/history', label: 'File Timeline', icon: History },
+        { path: '/security', label: 'Security Shield', icon: ShieldAlert },
         { path: '/settings', label: 'Scan & Configure', icon: SettingsIcon },
     ];
 

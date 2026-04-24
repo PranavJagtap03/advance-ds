@@ -23,6 +23,7 @@ const Search = () => {
     const [results, setResults] = useState<SearchResult[]>([]);
     const [activeFilter, setActiveFilter] = useState('All');
     const [searching, setSearching] = useState(false);
+    const [useRegex, setUseRegex] = useState(false);
 
     useEffect(() => {
         const unsub = subscribe('search', (line) => {
@@ -67,8 +68,14 @@ const Search = () => {
         if (!q) return;
         setResults([]);
         setSearching(true);
-        if (q.endsWith('*')) sendCommand(`PREFIX ${q.slice(0, -1)}`, 'search');
-        else sendCommand(`SEARCH ${q}`, 'search');
+        
+        if (useRegex) {
+            sendCommand(`REGEX ${q}`, 'search');
+        } else if (q.endsWith('*')) {
+            sendCommand(`PREFIX ${q.slice(0, -1)}`, 'search');
+        } else {
+            sendCommand(`SEARCH ${q}`, 'search');
+        }
     };
 
     const filteredResults = useMemo(() => {
@@ -90,7 +97,7 @@ const Search = () => {
         <div className="flex flex-col h-full gap-6">
             <header>
                 <h1 className="font-h1 text-on-surface text-2xl font-bold">File Search</h1>
-                <p className="text-on-surface-variant text-sm mt-1">Locate any file instantly. Use * for partial matches (e.g. "report*").</p>
+                <p className="text-on-surface-variant text-sm mt-1">Locate any file instantly. Use * for prefix matches, or enable REGEX for pattern search.</p>
             </header>
 
             <div className="flex flex-col gap-4 max-w-4xl">
@@ -101,14 +108,23 @@ const Search = () => {
                             type="text" 
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
-                            placeholder="Enter filename..."
+                            placeholder={useRegex ? "Enter regex pattern (e.g. .*\\.exe)..." : "Enter filename..."}
                             className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-2xl py-4 pl-12 pr-4 outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all shadow-sm"
                         />
-                        {query && (
-                            <button onClick={() => setQuery('')} className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-container rounded-full">
-                                <X className="w-4 h-4 text-outline" />
+                        <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                            {query && (
+                                <button type="button" onClick={() => setQuery('')} className="p-1 hover:bg-surface-container rounded-full">
+                                    <X className="w-4 h-4 text-outline" />
+                                </button>
+                            )}
+                            <button 
+                                type="button" 
+                                onClick={() => setUseRegex(!useRegex)}
+                                className={`px-3 py-1.5 rounded-xl text-[10px] font-black transition-all border ${useRegex ? 'bg-secondary text-on-secondary border-secondary shadow-md' : 'bg-surface-container-high text-on-surface-variant border-outline-variant/20 hover:border-outline-variant'}`}
+                            >
+                                REGEX
                             </button>
-                        )}
+                        </div>
                     </div>
                     <button type="submit" className="bg-primary text-on-primary px-8 rounded-2xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-lg">
                         SEARCH

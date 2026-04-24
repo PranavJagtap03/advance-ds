@@ -5,14 +5,20 @@
 #include <vector>
 #include <iostream>
 #include <iomanip>
+#include <string>
 
 using namespace std;
 
 class PersistentDS {
 private:
     map<int, vector<FileNode>> history;
+    string backupDir = ".fsm_backup";
+
+    bool copyFile(const string& source, const string& destination);
+    void ensureBackupDir();
 
 public:
+    PersistentDS();
     // Saves a new version of the file node into history
     void saveVersion(FileNode& f);
     
@@ -27,4 +33,8 @@ public:
     
     // Checks if a file has version history
     bool hasHistory(int fileId);
+
+    // Physical backup logic
+    bool backupFile(const FileNode& f);
+    bool restoreFile(const FileNode& f, int version);
 };

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useEngine } from '../contexts/EngineContext';
-import { Copy, Trash2, Zap, AlertCircle, HardDrive, History, FileWarning } from 'lucide-react';
+import { Copy, Trash2, Zap, Download, FileWarning } from 'lucide-react';
 
 interface ReclaimAction {
     type: 'DUPLICATES' | 'OLD_FILES' | 'LARGE_FILE';
@@ -73,6 +73,23 @@ const Duplicates = () => {
         sendCommand('DUPLICATES', 'duplicates');
     };
 
+    const downloadCSV = () => {
+        const headers = ["Name", "Hash", "Size (KB)", "Path"];
+        const rows = duplicateGroups.flatMap(g => 
+            g.paths.map(p => [g.name, g.hash, g.sizeKB.toString(), p])
+        );
+        
+        const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", `duplicates_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
     const formatMB = (bytes: number) => (bytes / 1048576).toFixed(1) + ' MB';
 
     return (
@@ -82,14 +99,24 @@ const Duplicates = () => {
                     <h1 className="text-2xl font-bold text-on-surface">Free Up Space</h1>
                     <p className="text-on-surface-variant text-sm mt-1">Optimize your storage by removing redundant or obsolete files.</p>
                 </div>
-                <button 
-                    onClick={refresh}
-                    disabled={loading}
-                    className="flex items-center gap-2 bg-primary text-on-primary px-5 py-2.5 rounded-xl font-bold hover:brightness-110 transition-all shadow-md disabled:opacity-50"
-                >
-                    <Zap className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                    {loading ? 'ANALYZING...' : 'REFRESH ADVISOR'}
-                </button>
+                <div className="flex gap-3">
+                    <button 
+                        onClick={downloadCSV}
+                        disabled={duplicateGroups.length === 0}
+                        className="flex items-center gap-2 bg-surface-container-high text-on-surface px-4 py-2.5 rounded-xl font-bold hover:bg-surface-container-highest transition-all border border-outline-variant/20 disabled:opacity-50"
+                    >
+                        <Download className="w-4 h-4" />
+                        EXPORT CSV
+                    </button>
+                    <button 
+                        onClick={refresh}
+                        disabled={loading}
+                        className="flex items-center gap-2 bg-primary text-on-primary px-5 py-2.5 rounded-xl font-bold hover:brightness-110 transition-all shadow-md disabled:opacity-50"
+                    >
+                        <Zap className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                        {loading ? 'ANALYZING...' : 'REFRESH ADVISOR'}
+                    </button>
+                </div>
             </header>
 
             {/* Reclaim advisor summary */}
@@ -102,22 +129,6 @@ const Duplicates = () => {
                     <p className="text-on-surface-variant mt-4 text-sm leading-relaxed max-w-md">
                         We've identified potential savings across duplicates and old files. Cleaning these up will improve your system performance.
                     </p>
-                </div>
-                <div className="grid grid-cols-2 gap-4 w-full md:w-auto">
-                    <div className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 shadow-sm flex flex-col items-center justify-center min-w-[140px]">
-                        <Copy className="text-blue-500 w-5 h-5 mb-2" />
-                        <p className="text-[10px] font-bold text-outline uppercase">Duplicates</p>
-                        <p className="text-lg font-black text-on-surface">
-                            {formatMB(reclaimActions.find(a => a.type === 'DUPLICATES')?.size || 0)}
-                        </p>
-                    </div>
-                    <div className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 shadow-sm flex flex-col items-center justify-center min-w-[140px]">
-                        <History className="text-orange-500 w-5 h-5 mb-2" />
-                        <p className="text-[10px] font-bold text-outline uppercase">Old Files</p>
-                        <p className="text-lg font-black text-on-surface">
-                            {formatMB(reclaimActions.find(a => a.type === 'OLD_FILES')?.size || 0)}
-                        </p>
-                    </div>
                 </div>
             </div>
 

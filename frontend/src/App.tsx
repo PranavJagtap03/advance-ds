@@ -10,6 +10,7 @@ import Orphans from './pages/Orphans';
 import Analytics from './pages/Analytics';
 import History from './pages/History';
 import Settings from './pages/Settings';
+import Security from './pages/Security';
 
 const App = () => {
     return (
@@ -23,6 +24,7 @@ const App = () => {
                         <Route path="orphans" element={<Orphans />} />
                         <Route path="analytics" element={<Analytics />} />
                         <Route path="history" element={<History />} />
+                        <Route path="security" element={<Security />} />
                         <Route path="settings" element={<Settings />} />
                     </Route>
                 </Routes>

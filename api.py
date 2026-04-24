@@ -57,21 +57,34 @@ class FileCache:
                     filename TEXT,
                     size INT,
                     mtime INT,
-                    parent_dir TEXT
+                    parent_dir TEXT,
+                    trueType TEXT,
+                    entropy REAL
                 )
             """)
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON files(parent_dir)")
+            
+            # Migrations for existing databases
+            try:
+                self.conn.execute("ALTER TABLE files ADD COLUMN trueType TEXT DEFAULT 'DATA'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.conn.execute("ALTER TABLE files ADD COLUMN entropy REAL DEFAULT 0.0")
+            except sqlite3.OperationalError:
+                pass
 
     def save_scan_results(self, root_dir, files_list):
+        # files_list items: (fname, path, sz, mt, ttype, ent)
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO files (filepath, filename, size, mtime, parent_dir) VALUES (?, ?, ?, ?, ?)",
-                [(fp, fname, sz, mt, os.path.dirname(fp)) for (fname, fp, sz, mt) in files_list]
+                "INSERT OR REPLACE INTO files (filepath, filename, size, mtime, parent_dir, trueType, entropy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(fp, fname, sz, mt, os.path.dirname(fp), ttype, ent) for (fname, fp, sz, mt, ttype, ent) in files_list]
             )
 
     def load_all_batch(self, bridge):
         cursor = self.conn.cursor()
-        cursor.execute("SELECT filepath, filename, size, mtime FROM files")
+        cursor.execute("SELECT filepath, filename, size, mtime, trueType, entropy FROM files")
         rows = cursor.fetchall()
         
         if not rows:
@@ -81,23 +94,25 @@ class FileCache:
         with bridge._lock:
             try:
                 bridge.proc.stdin.write("LOAD_BATCH_BEGIN\n")
-                for fp, fname, sz, mt in rows:
+                for row in rows:
+                    fp, fname, sz, mt, ttype, ent = row
                     p_dir = os.path.dirname(fp)
                     if not p_dir: p_dir = "root"
-                    bridge.proc.stdin.write(f"{fname}|{p_dir}|{sz}|{mt:d}\n")
+                    ttype = ttype or "DATA"
+                    ent = ent or 0.0
+                    bridge.proc.stdin.write(f"{fname}|{p_dir}|{sz}|{mt:d}|{ttype}|{ent:.4f}\n")
                     count += 1
                 bridge.proc.stdin.write("LOAD_BATCH_END\n")
                 bridge.proc.stdin.flush()
             except BrokenPipeError:
                 return 0
                 
-        # The dedicated reader loop in SubprocessBridge will catch the "BATCH_DONE|count" response
         return count
 
 class SubprocessBridge:
     TERMINATORS = {"DUP_DONE", "ORPHAN_DONE", "ANALYTICS_DONE",
                    "BENCH_DONE", "VERSION_DONE", "BYE", "BATCH_DONE", "REC_OK", "LOADED",
-                   "ROLLBACK_OK", "ROLLBACK_ERROR", "CACHE_DONE"}
+                   "ROLLBACK_OK", "ROLLBACK_ERROR", "CACHE_DONE", "TYPE_DONE", "SUSPICIOUS_DONE"}
 
     def __init__(self):
         self.proc = None
@@ -161,25 +176,27 @@ class SubprocessBridge:
             prefix = parts[0]
             
             if prefix == "CACHE_ITEM" and len(parts) >= 5:
-                # CACHE_ITEM|fname|path|size|mtime
-                self.cache_buffer.append((parts[1], parts[2], int(parts[3]), int(parts[4])))
+                # CACHE_ITEM|fname|path|size|mtime|trueType|entropy
+                fname = parts[1]
+                path = parts[2]
+                sz = int(parts[3])
+                mt = int(parts[4])
+                ttype = parts[5] if len(parts) > 5 else "DATA"
+                ent = float(parts[6]) if len(parts) > 6 else 0.0
+                self.cache_buffer.append((fname, path, sz, mt, ttype, ent))
                 continue
 
             if prefix == "CACHE_DONE":
                 if cache and self.cache_buffer:
                     cache.save_scan_results("root", self.cache_buffer)
                     self.cache_buffer = []
-                # No break/return, continue to broadcast CACHE_DONE if needed
-            
-            # Map engine output to specific tags or just broadcast as global
-            # For the current frontend, we'll broadcast as 'engine_stream'
-            # We can try to guess the tag based on prefix, but broadcasting to 'global'
-            # and the specific functional tags is safer.
             
             target_tags = ["global", "api_req"]
             if prefix in ("DUP", "DUP_DONE"): target_tags.append("duplicates")
             if prefix in ("ORPHAN", "ORPHAN_DONE"): target_tags.append("orphans")
             if prefix in ("MONTH", "ANALYTICS_DONE"): target_tags.append("analytics")
+            if prefix in ("SUSPICIOUS", "SUSPICIOUS_DONE"): target_tags.append("security")
+            if prefix in ("TYPE", "TYPE_DONE"): target_tags.append("analytics")
             if prefix in ("RESULT"):
                 if len(parts) > 1 and parts[1] == "VERSION": target_tags.append("history")
                 else: target_tags.append("search")

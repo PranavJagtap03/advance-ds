@@ -1565,7 +1565,7 @@ pair<int,long> loadDirectory(const string& dirPath, int parentId = 0) {
 
 void performDeepAnalysis(vector<FileNode>& files) {
     for (size_t i = 0; i < files.size(); i++) {
-        if (files[i].trueType == "UNKNOWN" && files[i].size > 0) {
+        if ((files[i].trueType == "UNKNOWN" || files[i].entropy == 0.0) && files[i].size > 0) {
             FileNode deep(files[i].name, files[i].path, files[i].parentId, files[i].size, files[i].createdAt, true);
             deep.id = files[i].id;
             deep.modifiedAt = files[i].modifiedAt;
@@ -4775,7 +4775,7 @@ const Settings = () => {
                                     </div>
                                     <div className="overflow-hidden">
                                         <h4 className="font-bold text-sm text-on-surface truncate">Local User Library</h4>
-                                        <p className="text-[10px] text-on-surface-variant font-mono truncate opacity-70">C:\Users\HP\Documents</p>
+                                        <p className="text-[10px] text-on-surface-variant font-mono truncate opacity-70">Use the input above to index a folder</p>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-4">

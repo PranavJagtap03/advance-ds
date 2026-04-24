@@ -12,6 +12,7 @@
 #include <iostream>
 #include <map>
 #include <vector>
+#include <cmath>
 
 using namespace std;
 
@@ -21,6 +22,39 @@ extern SegmentTree segTree;
 extern PersistentDS pds;
 extern UnionFind uf;
 extern vector<int> allFileIds;
+
+// ─────────────────────────
+// INTELLIGENCE HELPERS
+// ─────────────────────────
+
+inline double calculateEntropy(const char* data, size_t len) {
+    if (len == 0) return 0.0;
+    map<unsigned char, int> freq;
+    for (size_t i = 0; i < len; i++) freq[(unsigned char)data[i]]++;
+    
+    double entropy = 0.0;
+    for (auto const& pair : freq) {
+        double p = (double)pair.second / len;
+        entropy -= p * log2(p);
+    }
+    return entropy;
+}
+
+inline string getTrueFileType(const char* data, size_t len) {
+    if (len < 4) return "UNKNOWN";
+    unsigned char b[4];
+    for(int i=0; i<4; i++) b[i] = (unsigned char)data[i];
+
+    if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "PNG";
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "JPEG";
+    if (b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46) return "PDF";
+    if (b[0] == 0x50 && b[1] == 0x4B && b[2] == 0x03 && b[3] == 0x04) return "ZIP/OFFICE";
+    if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38) return "GIF";
+    if (b[0] == 0x7F && b[1] == 0x45 && b[2] == 0x4C && b[3] == 0x46) return "ELF";
+    if (b[0] == 0x4D && b[1] == 0x5A) return "EXE/DLL";
+    
+    return "DATA";
+}
 
 // ─────────────────────────
 // FUNCTION 1: findDuplicates()

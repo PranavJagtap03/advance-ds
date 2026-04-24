@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useEngine } from '../contexts/EngineContext';
-import { Ghost, Link2Off, Trash2, FolderSync, Info, AlertCircle } from 'lucide-react';
+import { Ghost, Link2Off, Trash2, FolderSync, AlertCircle } from 'lucide-react';
 
 interface BrokenLink {
     id: number;
@@ -49,23 +49,41 @@ const Orphans = () => {
         setLinks(prev => prev.filter(l => l.id !== id));
     };
 
+    const handleDeleteAll = () => {
+        if (confirm(`Are you sure you want to delete all ${links.length} orphan files?`)) {
+            sendCommand('DELETE_ORPHANS', 'orphans');
+            setLinks([]);
+        }
+    };
+
     return (
         <div className="flex flex-col h-full gap-6">
             <header className="flex justify-between items-start">
                 <div>
-                    <h1 className="text-2xl font-bold text-on-surface text-2xl font-bold">Broken File Links</h1>
+                    <h1 className="text-2xl font-bold text-on-surface">Broken File Links</h1>
                     <p className="text-on-surface-variant text-sm mt-1">
                         Files whose parent folders no longer exist or are disconnected from the scan root.
                     </p>
                 </div>
-                <button 
-                    onClick={refresh}
-                    disabled={loading}
-                    className="bg-primary text-on-primary px-6 py-2.5 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-md disabled:opacity-50 flex items-center gap-2"
-                >
-                    <FolderSync className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                    {loading ? 'VALIDATING...' : 'CHECK LINKS'}
-                </button>
+                <div className="flex gap-3">
+                    {links.length > 0 && (
+                        <button 
+                            onClick={handleDeleteAll}
+                            className="bg-error text-on-error px-6 py-2.5 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-md flex items-center gap-2"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                            DELETE ALL
+                        </button>
+                    )}
+                    <button 
+                        onClick={refresh}
+                        disabled={loading}
+                        className="bg-primary text-on-primary px-6 py-2.5 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-md disabled:opacity-50 flex items-center gap-2"
+                    >
+                        <FolderSync className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                        {loading ? 'VALIDATING...' : 'CHECK LINKS'}
+                    </button>
+                </div>
             </header>
 
             {links.length > 0 ? (
