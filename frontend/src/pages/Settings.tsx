@@ -59,7 +59,7 @@ const Settings = () => {
                                     </div>
                                     <div className="overflow-hidden">
                                         <h4 className="font-bold text-sm text-on-surface truncate">Local User Library</h4>
-                                        <p className="text-[10px] text-on-surface-variant font-mono truncate opacity-70">C:\Users\HP\Documents</p>
+                                        <p className="text-[10px] text-on-surface-variant font-mono truncate opacity-70">Use the input above to index a folder</p>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-4">
