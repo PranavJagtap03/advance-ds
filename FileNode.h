@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <sstream>
+#include <iomanip>
 
 using namespace std;
 
@@ -41,6 +43,22 @@ struct FileNode {
     // Parameterized constructor
     FileNode(string name, string path, int parentId, long size, long createdAt) 
         : name(name), path(path), parentId(parentId), size(size), createdAt(createdAt), modifiedAt(createdAt) {
-        checksum = to_string(size) + name.substr(0, min(3, (int)name.size()));
+        
+        // FNV-1a Hash Implementation
+        unsigned long long hash = 14695981039346656037ULL;
+        auto hashStr = [&](const string& s) {
+            for (char c : s) {
+                hash ^= (unsigned char)c;
+                hash *= 1099511628211ULL;
+            }
+        };
+        
+        hashStr(name);
+        hashStr(to_string(size));
+        hashStr(to_string(createdAt));
+        
+        stringstream ss;
+        ss << hex << hash;
+        checksum = ss.str();
     }
 };

@@ -1,150 +1,149 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useEngine } from '../contexts/EngineContext';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { Layers, Activity, Cpu } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { TrendingUp, FileWarning, BarChart3, Clock } from 'lucide-react';
+
+interface LargeFile {
+    name: string;
+    size: number;
+    path: string;
+}
 
 const Analytics = () => {
     const { sendCommand, subscribe } = useEngine();
     const [monthlyData, setMonthlyData] = useState<{ month: string, size: number }[]>([]);
-    const [rangeResult, setRangeResult] = useState<{size: string, complexity: string, hops: string} | null>(null);
-    const [startMonth, setStartMonth] = useState('1');
-    const [endMonth, setEndMonth] = useState('12');
+    const [largeFiles, setLargeFiles] = useState<LargeFile[]>([]);
+    const [loading, setLoading] = useState(false);
 
     useEffect(() => {
-        let rawDays: number[] = new Array(366).fill(0);
+        let rawMonths: { month: string, size: number }[] = [];
+        let files: LargeFile[] = [];
         
-        const unsub = subscribe('analytics', (line, type) => {
-            if (line.startsWith('RESULT|ANALYTICS')) {
+        const unsub = subscribe('analytics', (line) => {
+            if (line.startsWith('MONTH|')) {
                 const parts = line.split('|');
-                const day = parseInt(parts[2], 10);
-                const size = parseInt(parts[3], 10);
-                if (day > 0 && day <= 366) {
-                    rawDays[day-1] = size;
-                }
-            } else if (line === 'ANALYTICS_DONE') {
-                // Group into 12 months for chart
-                const formatted = [];
-                const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                for (let m = 0; m < 12; m++) {
-                    const block = rawDays.slice(m * 30, (m + 1) * 30);
-                    const sum = block.reduce((a,b) => a+b, 0);
-                    formatted.push({ month: monthNames[m], size: sum });
-                }
-                setMonthlyData(formatted);
+                rawMonths.push({ month: parts[1], size: parseFloat(parts[2]) });
+            } 
+            else if (line.startsWith('ANALYTICS_DONE')) {
+                setMonthlyData([...rawMonths]);
+                setLoading(false);
             }
-            else if (line.startsWith('RESULT|DATE_RANGE')) {
+            else if (line.startsWith('REC|LARGE_FILE|')) {
                 const parts = line.split('|');
-                setRangeResult({
-                    size: parts[4] || '0',
-                    complexity: 'Segment Tree O(log M)',
-                    hops: parts[7] || '0'
+                files.push({
+                    name: parts[2],
+                    size: parseInt(parts[3]),
+                    path: parts[4]
                 });
+            }
+            else if (line.startsWith('RECLAIM_DONE')) {
+                setLargeFiles([...files].sort((a,b) => b.size - a.size).slice(0, 5));
             }
         });
 
-        // Fetch overall analytics mapping on mount
-        sendCommand('ANALYTICS', 'analytics');
-
+        refresh();
         return () => unsub();
     }, [subscribe, sendCommand]);
 
-    const calculateDelta = () => {
-        setRangeResult(null);
-        sendCommand(`DATE_RANGE ${startMonth} ${endMonth}`, 'analytics');
+    const refresh = () => {
+        setLoading(true);
+        setMonthlyData([]);
+        setLargeFiles([]);
+        sendCommand('ANALYTICS', 'analytics');
+        sendCommand('RECLAIM', 'analytics');
     };
 
+    const formatMB = (bytes: number) => (bytes / 1048576).toFixed(1) + ' MB';
+
     return (
-        <div className="flex flex-col h-full gap-6">
-            <header className="flex justify-between items-end">
-                <div>
-                    <h1 className="font-h1 text-on-surface">Storage Segment Analytics</h1>
-                    <p className="text-on-surface-variant font-body-md mt-1">
-                        Visualize file system ingestion across temporal domains resolved via Segment Trees.
-                    </p>
-                </div>
-                <button 
-                    onClick={() => sendCommand('ANALYTICS', 'analytics')}
-                    className="bg-surface-container border border-outline-variant/30 text-on-surface px-4 py-2 rounded-md font-label-md tracking-wider hover:bg-surface-variant shadow-sm flex items-center gap-2"
-                >
-                    <Activity className="w-4 h-4"/> REFRESH SERIES
-                </button>
+        <div className="flex flex-col h-full gap-8">
+            <header>
+                <h1 className="text-2xl font-bold text-on-surface">Storage Trends</h1>
+                <p className="text-on-surface-variant text-sm mt-1">
+                    Analyze library growth and identify significant space consumers.
+                </p>
             </header>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                
-                {/* Chart Block */}
-                <div className="lg:col-span-2 bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/20 shadow-sm flex flex-col">
-                    <h3 className="font-h3 text-on-surface mb-6 flex items-center gap-2">
-                        <Layers className="text-primary w-5 h-5"/> Temporal Growth Nodes
-                    </h3>
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+                {/* Growth Chart */}
+                <div className="xl:col-span-2 bg-surface-container-lowest p-8 rounded-3xl border border-outline-variant/10 shadow-sm flex flex-col">
+                    <div className="flex items-center justify-between mb-8">
+                        <h3 className="text-sm font-black text-outline uppercase tracking-widest flex items-center gap-2">
+                            <TrendingUp className="text-primary w-4 h-4"/> Library Growth
+                        </h3>
+                        <p className="text-[10px] font-bold text-on-surface-variant px-3 py-1 bg-surface-container rounded-full">STORAGE ADDED PER MONTH</p>
+                    </div>
                     
-                    <div className="flex-1 min-h-[300px]">
+                    <div className="h-[300px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
                             <AreaChart data={monthlyData}>
                                 <defs>
-                                    <linearGradient id="colorSize" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.3}/>
-                                    <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
+                                    <linearGradient id="growthGradient" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.1}/>
+                                        <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
                                     </linearGradient>
                                 </defs>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#e5eeff" vertical={false} />
-                                <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{fill: '#777587', fontSize: 12}} dy={10} />
-                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#777587', fontSize: 12}} dx={-10} tickFormatter={(val) => `${val/1024}MB`} />
+                                <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{fill: '#777587', fontSize: 10, fontWeight: 700}} dy={10} />
+                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#777587', fontSize: 10, fontWeight: 700}} dx={-10} tickFormatter={(val) => `${val}MB`} />
                                 <Tooltip 
-                                    contentStyle={{backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e5eeff', boxShadow: '0 4px 15px rgba(0,0,0,0.05)'}}
-                                    itemStyle={{color: '#4f46e5', fontWeight: 600, fontFamily: '"Public Sans", sans-serif'}}
-                                    formatter={(value) => [`${value} KB`, 'Volume']}
+                                    contentStyle={{backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e5eeff', boxShadow: '0 8px 30px rgba(0,0,0,0.08)', padding: '12px'}}
+                                    labelStyle={{fontWeight: 800, marginBottom: '4px', fontSize: '12px'}}
+                                    itemStyle={{color: '#4f46e5', fontWeight: 700, fontSize: '12px'}}
+                                    formatter={(value) => [`${value} MB`, 'Storage Added']}
                                 />
-                                <Area type="monotone" dataKey="size" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorSize)" />
+                                <Area type="monotone" dataKey="size" stroke="#4f46e5" strokeWidth={4} fillOpacity={1} fill="url(#growthGradient)" />
                             </AreaChart>
                         </ResponsiveContainer>
                     </div>
                 </div>
 
-                {/* Range Query Tool */}
-                <div className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/20 shadow-sm flex flex-col gap-4">
-                    <h3 className="font-h3 text-on-surface mb-2 flex items-center gap-2">
-                        <Cpu className="text-secondary w-5 h-5"/> Range Extractor
+                {/* Largest Files */}
+                <div className="bg-surface-container-lowest p-8 rounded-3xl border border-outline-variant/10 shadow-sm flex flex-col gap-6">
+                    <h3 className="text-sm font-black text-outline uppercase tracking-widest flex items-center gap-2">
+                        <BarChart3 className="text-secondary w-4 h-4"/> Largest Files
                     </h3>
-                    <p className="text-xs text-on-surface-variant font-sans">
-                        Query the segment tree to compute aggregations in strict logarithmic time O(log M).
-                    </p>
-
-                    <div className="grid grid-cols-2 gap-4 mt-2">
-                        <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-mono text-outline uppercase tracking-widest">Start Interval</label>
-                            <select value={startMonth} onChange={e => setStartMonth(e.target.value)} className="bg-surface-container border border-outline-variant/30 rounded-md p-2 text-sm text-primary font-mono outline-none focus:border-primary">
-                                {["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"].map((m, i) => <option key={i+1} value={i+1}>{m}</option>)}
-                            </select>
-                        </div>
-                        <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-mono text-outline uppercase tracking-widest">End Interval</label>
-                            <select value={endMonth} onChange={e => setEndMonth(e.target.value)} className="bg-surface-container border border-outline-variant/30 rounded-md p-2 text-sm text-primary font-mono outline-none focus:border-primary">
-                                {["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"].map((m, i) => <option key={i+1} value={i+1}>{m}</option>)}
-                            </select>
-                        </div>
+                    <div className="flex-1 space-y-4">
+                        {largeFiles.length === 0 ? (
+                            <div className="text-center py-12 text-outline-variant text-sm">No large files indexed.</div>
+                        ) : (
+                            largeFiles.map((file, i) => (
+                                <div key={i} className="flex flex-col gap-1 p-3 rounded-xl hover:bg-surface-container transition-colors group">
+                                    <div className="flex justify-between items-center">
+                                        <p className="font-bold text-xs text-on-surface truncate pr-4">{file.name}</p>
+                                        <p className="text-xs font-black text-primary">{formatMB(file.size)}</p>
+                                    </div>
+                                    <p className="text-[10px] text-on-surface-variant font-mono truncate opacity-60 group-hover:opacity-100 transition-opacity">{file.path}</p>
+                                    <div className="w-full h-1 bg-surface-container-high rounded-full mt-2 overflow-hidden shadow-inner">
+                                        <div style={{ width: `${(file.size / largeFiles[0].size) * 100}%` }} className="h-full bg-secondary/40 rounded-full" />
+                                    </div>
+                                </div>
+                            ))
+                        )}
                     </div>
-
-                    <button 
-                        onClick={calculateDelta}
-                        className="w-full bg-secondary text-on-secondary py-2 rounded-md font-label-md tracking-wider hover:bg-secondary-container hover:text-on-secondary-container transition-colors mt-2"
-                    >
-                        PULL AGGREGATE DELTA
-                    </button>
-
-                    {rangeResult && (
-                        <div className="mt-4 p-4 bg-surface-container-low border border-primary/20 rounded-lg">
-                            <div className="text-xs font-mono text-outline uppercase tracking-tight mb-1">Compute Resolution</div>
-                            <div className="text-2xl font-bold text-on-surface">{rangeResult.size} KB</div>
-                            
-                            <div className="flex items-center gap-3 mt-3 pt-3 border-t border-outline-variant/20">
-                                <div className="text-[10px] font-mono text-on-surface-variant"><span className="text-primary font-bold">ROUTE: </span>{rangeResult.complexity}</div>
-                                <div className="text-[10px] font-mono text-on-surface-variant"><span className="text-primary font-bold">HOPS: </span>{rangeResult.hops}</div>
-                            </div>
-                        </div>
-                    )}
                 </div>
+            </div>
 
+            {/* Distribution Placeholder */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="bg-surface-container-low p-6 rounded-2xl border border-outline-variant/10 flex items-center gap-6">
+                    <div className="p-4 bg-primary/10 text-primary rounded-2xl">
+                        <Clock className="w-6 h-6" />
+                    </div>
+                    <div>
+                        <p className="text-[10px] font-black text-outline uppercase tracking-widest mb-1">Average File Age</p>
+                        <h4 className="text-xl font-black text-on-surface">1.2 Years</h4>
+                    </div>
+                </div>
+                <div className="bg-surface-container-low p-6 rounded-2xl border border-outline-variant/10 flex items-center gap-6">
+                    <div className="p-4 bg-secondary/10 text-secondary rounded-2xl">
+                        <FileWarning className="w-6 h-6" />
+                    </div>
+                    <div>
+                        <p className="text-[10px] font-black text-outline uppercase tracking-widest mb-1">Obsolete Storage</p>
+                        <h4 className="text-xl font-black text-on-surface">15% of library</h4>
+                    </div>
+                </div>
             </div>
         </div>
     );

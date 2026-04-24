@@ -91,18 +91,20 @@ class FileCache:
             except BrokenPipeError:
                 return 0
                 
-        # Start a single multi-line reader to catch the "BATCH_DONE|count" response
-        threading.Thread(target=bridge._reader, args=("startup_batch", True), daemon=True).start()
+        # The dedicated reader loop in SubprocessBridge will catch the "BATCH_DONE|count" response
         return count
 
 class SubprocessBridge:
     TERMINATORS = {"DUP_DONE", "ORPHAN_DONE", "ANALYTICS_DONE",
-                   "BENCH_DONE", "VERSION_DONE", "BYE", "BATCH_DONE"}
+                   "BENCH_DONE", "VERSION_DONE", "BYE", "BATCH_DONE", "REC_OK", "LOADED",
+                   "ROLLBACK_OK", "ROLLBACK_ERROR"}
 
     def __init__(self):
         self.proc = None
         self._lock = threading.Lock()
         self._start_process()
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
 
     def _start_process(self):
         binary = "fsm.exe" if sys.platform == "win32" else "./fsm"
@@ -117,7 +119,7 @@ class SubprocessBridge:
             [full_bin, "--machine"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             cwd=ds_dir,
@@ -125,50 +127,64 @@ class SubprocessBridge:
 
     def send(self, command: str, tag: str = "default"):
         if not self.proc:
+            print("Process not running")
             return
         with self._lock:
             try:
                 self.proc.stdin.write(command + "\n")
                 self.proc.stdin.flush()
             except BrokenPipeError:
-                print("Broken pipe error")
-                return
-
-        is_multi = any(command.startswith(c) for c in
-                       ("DUPLICATES", "ORPHANS", "ANALYTICS",
-                        "BENCHMARK", "VERSION_HISTORY", "GENERATE",
-                        "LOAD_DIR", "LOAD_BATCH"))
-        
-        threading.Thread(target=self._reader, args=(tag, is_multi), daemon=True).start()
+                print("Broken pipe error, restarting process...")
+                self._start_process()
 
     def _broadcast_threadsafe(self, event: str, data: dict):
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(manager.broadcast({"event": event, "data": data}), loop)
 
-    def _reader(self, tag: str, multi: bool):
-        try:
-            if multi:
-                while True:
-                    line = self.proc.stdout.readline()
-                    if not line:
-                        break
-                    line = line.rstrip("\n\r")
-                    prefix = line.split("|")[0]
-                    if prefix == "INDEXING":
-                        self._broadcast_threadsafe("engine_progress", {"tag": tag, "line": line})
-                    else:
-                        self._broadcast_threadsafe("engine_stream", {"tag": tag, "line": line})
-                    
-                    if prefix in self.TERMINATORS:
-                        break
-            else:
-                line = self.proc.stdout.readline().rstrip("\n\r")
-                self._broadcast_threadsafe("engine_stream", {"tag": tag, "line": line})
-                
-        except Exception as e:
-            print(f"Reader error: {e}")
+    def _reader_loop(self):
+        while True:
+            if not self.proc:
+                threading.Event().wait(1)
+                continue
             
-        self._broadcast_threadsafe("engine_done", {"tag": tag})
+            line = self.proc.stdout.readline()
+            if not line:
+                print("Engine stdout closed")
+                break
+            
+            line = line.rstrip("\n\r")
+            if not line:
+                continue
+
+            parts = line.split("|")
+            prefix = parts[0]
+            
+            # Map engine output to specific tags or just broadcast as global
+            # For the current frontend, we'll broadcast as 'engine_stream'
+            # We can try to guess the tag based on prefix, but broadcasting to 'global'
+            # and the specific functional tags is safer.
+            
+            target_tags = ["global", "api_req"]
+            if prefix in ("DUP", "DUP_DONE"): target_tags.append("duplicates")
+            if prefix in ("ORPHAN", "ORPHAN_DONE"): target_tags.append("orphans")
+            if prefix in ("MONTH", "ANALYTICS_DONE"): target_tags.append("analytics")
+            if prefix in ("RESULT"):
+                if len(parts) > 1 and parts[1] == "VERSION": target_tags.append("history")
+                else: target_tags.append("search")
+            if prefix in ("ROLLBACK_OK", "ROLLBACK_ERROR"): target_tags.append("history")
+            if prefix == "INDEXING":
+                self._broadcast_threadsafe("engine_progress", {"tag": "explorer", "line": line})
+                continue
+            if prefix in ("LOADED", "BATCH_DONE", "REC_OK"):
+                target_tags.append("explorer")
+                target_tags.append("global_status")
+
+            for t in target_tags:
+                self._broadcast_threadsafe("engine_stream", {"tag": t, "line": line})
+
+            if prefix in self.TERMINATORS:
+                for t in target_tags:
+                    self._broadcast_threadsafe("engine_done", {"tag": t})
 
 cache = None
 bridge = None

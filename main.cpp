@@ -13,13 +13,18 @@
 #include <sstream>
 #include <algorithm>
 #include <ctime>
+#include <unordered_map>
+#include <map>
+#include <chrono>
+#include <fstream>
 
-// Platform-specific directory traversal
 #ifdef _WIN32
     #include <windows.h>
 #else
     #include <dirent.h>
     #include <sys/stat.h>
+    #include <sys/statvfs.h>
+    #include <unistd.h>
 #endif
 
 using namespace std;
@@ -34,937 +39,339 @@ PersistentDS pds;
 UnionFind uf;
 vector<int> allFileIds;
 int nextFileId = 10000;
+unordered_map<string, int> directoryIds;
+int nextDirId = 10; 
+string scanRoot = "";
+
+struct Snapshot {
+    int id;
+    long long timestamp;
+    int fileCount;
+    long long totalBytes;
+    map<string, long long> fileMap; // path -> size
+};
+vector<Snapshot> snapshots;
+int nextSnapshotId = 1;
 
 // ═══════════════════════════════════
-// HELPER FUNCTIONS  (menu mode only)
+// UTILS
 // ═══════════════════════════════════
 
-void printSeparator() {
-    cout << string(60, '=') << endl;
-}
-
-void printBanner() {
-    cout << "============================================" << endl;
-    cout << "    FILE SYSTEM DIRECTORY MANAGER v1.0" << endl;
-    cout << "    B+Tree | Trie | SegTree | Persistent" << endl;
-    cout << "============================================" << endl;
-}
-
-void printFileTable(const vector<FileNode>& files) {
-    if (files.empty()) {
-        cout << "No files found." << endl;
-        return;
-    }
-    
-    cout << left << setw(6) << "ID" << " | " << setw(28) << "Name" << " | " 
-         << setw(10) << "Size KB" << " | " << setw(28) << "Path" << endl;
-    cout << string(80, '-') << endl;
-    
-    for (const auto& f : files) {
-        cout << left << setw(6) << f.id << " | " << setw(28) << f.name << " | " 
-             << setw(10) << f.size / 1024 << " | " << setw(28) << f.path << endl;
-    }
-    cout << "Total: " << files.size() << " file(s) found." << endl;
-}
-
-void printMenu() {
-    cout << "\n---- MENU ----\n";
-    cout << "1.  Add file\n";
-    cout << "2.  Delete file\n";
-    cout << "3.  Search by name prefix\n";
-    cout << "4.  Search by size range (KB)\n";
-    cout << "5.  Storage analytics by month\n";
-    cout << "6.  Find duplicate files\n";
-    cout << "7.  File version history\n";
-    cout << "8.  Edit file (creates new version)\n";
-    cout << "9.  Rollback file to old version\n";
-    cout << "10. Detect orphan files\n";
-    cout << "11. Generate 10000 test files\n";
-    cout << "12. Run benchmark\n";
-    cout << "13. Run stress tests\n";
-    cout << "14. Show system info\n";
-    cout << "0.  Exit\n";
-    cout << "Choice: " << flush;
-}
-
-// ═══════════════════════════════════
-// FEATURE FUNCTIONS  (menu mode)
-// ═══════════════════════════════════
-
-void addFile() {
-    string name, path;
-    long sizeKB;
-    int pid;
-
-    cout << "Enter filename: ";
-    cin >> name;
-    cin.ignore(1000, '\n');
-    
-    if (name.empty()) {
-        cout << "Filename cannot be empty." << endl;
-        return;
-    }
-
-    cout << "Enter path (e.g. /documents/file.txt): ";
-    getline(cin, path);
-
-    cout << "Enter size in KB: ";
-    if (!(cin >> sizeKB) || sizeKB <= 0) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid size." << endl;
-        return;
-    }
-
-    cout << "Enter parent folder ID (1=docs,2=downloads,3=photos,4=backup): ";
-    if (!(cin >> pid) || pid < 1 || pid > 4) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid parent folder ID." << endl;
-        return;
-    }
-    cin.ignore(1000, '\n');
-
-    FileNode f(name, path, pid, sizeKB * 1024, time(0));
-    f.id = nextFileId++;
-    f.modifiedAt = time(0);
-
-    bpt.insert(name, f);
-    trie.insert(name, f.id);
-    int dayIndex = (f.createdAt / 86400) % 365;
-    segTree.addFile(dayIndex, f.size);
-    uf.addNode(f.id);
-    uf.unite(f.id, f.parentId);
-    pds.saveVersion(f);
-    allFileIds.push_back(f.id);
-
-    cout << "File added successfully! ID: " << f.id << endl;
-}
-
-void deleteFile() {
-    string name;
-    cout << "Enter filename to delete: ";
-    cin >> name;
-    cin.ignore(1000, '\n');
-
-    FileNode* f = bpt.search(name);
-    if (!f) {
-        cout << "File not found: " << name << endl;
-        return;
-    }
-
-    bpt.remove(name);
-    trie.remove(name);
-    cout << "Deleted: " << name << endl;
-}
-
-void searchPrefix() {
-    string prefix;
-    cout << "Enter prefix to search: ";
-    cin >> prefix;
-    cin.ignore(1000, '\n');
-
-    vector<string> names = trie.prefixSearch(prefix);
-    if (names.empty()) {
-        cout << "No files found with prefix: " << prefix << endl;
-        return;
-    }
-
-    vector<FileNode> results;
-    for (const string& n : names) {
-        FileNode* f = bpt.search(n);
-        if (f) results.push_back(*f);
-    }
-    
-    printFileTable(results);
-}
-
-void searchBySize() {
-    long minKB, maxKB;
-    cout << "Enter minimum size in KB: ";
-    if (!(cin >> minKB) || minKB <= 0) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid minimum size." << endl;
-        return;
-    }
-    cout << "Enter maximum size in KB: ";
-    if (!(cin >> maxKB) || maxKB <= 0) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid maximum size." << endl;
-        return;
-    }
-    cin.ignore(1000, '\n');
-
-    if (minKB > maxKB) {
-        cout << "Invalid range: min cannot be greater than max." << endl;
-        return;
-    }
-
-    vector<FileNode> r = bpt.searchBySize(minKB * 1024, maxKB * 1024);
-    printFileTable(r);
-}
-
-void showVersionHistory() {
-    int fid;
-    cout << "Enter file ID: ";
-    if (!(cin >> fid)) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid format." << endl;
-        return;
-    }
-    cin.ignore(1000, '\n');
-    
-    pds.showHistory(fid);
-}
-
-void editFile() {
-    string name;
-    cout << "Enter filename to edit: ";
-    cin >> name;
-    cin.ignore(1000, '\n');
-
-    FileNode* f = bpt.search(name);
-    if (!f) {
-        cout << "File not found" << endl;
-        return;
-    }
-
-    cout << "Current Details - Name: " << f->name << " Size: " << f->size / 1024 
-         << " KB Path: " << f->path << " Version: " << f->version << endl;
-
-    cout << "Enter new size in KB (0 to keep same): ";
-    long newKB;
-    if (!(cin >> newKB)) {
-        cin.clear(); cin.ignore(1000, '\n');
-        newKB = 0;
-    } else {
-        cin.ignore(1000, '\n');
-    }
-
-    cout << "Enter new path (press Enter to keep same): ";
-    string newPath;
-    getline(cin, newPath);
-
-    FileNode updatedNode = *f;
-    if (newKB > 0) {
-        updatedNode.size = newKB * 1024;
-        updatedNode.checksum = to_string(updatedNode.size) + updatedNode.name.substr(0, min(3, (int)updatedNode.name.size()));
-    }
-    if (!newPath.empty()) {
-        updatedNode.path = newPath;
-    }
-    updatedNode.modifiedAt = time(0);
-    pds.saveVersion(updatedNode);
-
-    bpt.remove(name);
-    bpt.insert(updatedNode.name, updatedNode);
-
-    cout << "File updated! Version " << updatedNode.version << " saved." << endl;
-}
-
-void rollbackFile() {
-    int fid;
-    cout << "Enter file ID: ";
-    if (!(cin >> fid)) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid input." << endl;
-        return;
-    }
-    cin.ignore(1000, '\n');
-
-    if (!pds.hasHistory(fid)) {
-        cout << "No history for this ID" << endl;
-        return;
-    }
-    pds.showHistory(fid);
-
-    int ver;
-    cout << "Enter version number to rollback to: ";
-    if (!(cin >> ver)) {
-        cin.clear(); cin.ignore(1000, '\n');
-        cout << "Invalid version input." << endl;
-        return;
-    }
-    cin.ignore(1000, '\n');
-
-    pds.rollback(fid, ver, bpt);
-}
-
-void detectOrphans() {
-    vector<int> orphans = uf.findAllOrphans(0, allFileIds);
-    if (orphans.empty()) {
-        cout << "No orphan files found. All files connected." << endl;
-        return;
-    }
-
-    cout << "ORPHAN FILES DETECTED:" << endl;
-    long totalSize = 0;
-    vector<FileNode> allLeaves = bpt.getAllLeaves();
-
-    for (int id : orphans) {
-        for (const auto& file : allLeaves) {
-            if (file.id == id) {
-                cout << "  ID:" << file.id << " Name:" << file.name << " Size:" << file.size / 1024 << " KB Path:" << file.path << endl;
-                totalSize += file.size;
-                break;
-            }
-        }
-    }
-    cout << "Total: " << orphans.size() << " orphans, " << fixed << setprecision(2) << (totalSize / 1048576.0) << " MB potentially unrecoverable" << endl;
-}
-
-void showSystemInfo() {
-    cout << "=== SYSTEM INFO ===" << endl;
-    cout << "Total files: " << bpt.getSize() << endl;
-    cout << "Total indexed names (Trie): " << allFileIds.size() << endl;
-    cout << "Storage tracked: " << fixed << setprecision(2) << (segTree.queryRange(0, 364) / 1048576.0) << " MB" << endl;
-    
-    int filesWithHistory = 0;
-    for (int id : allFileIds) {
-        if (pds.hasHistory(id)) filesWithHistory++;
-    }
-    cout << "Files with version history: " << filesWithHistory << endl;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// MACHINE MODE — LOAD_DIR implementation
-// ═══════════════════════════════════════════════════════════════════
-
-// Join a vector of strings with a delimiter
-static string joinStrings(const vector<string>& v, char delim = ',') {
-    string s;
-    for (int i = 0; i < (int)v.size(); i++) {
-        if (i > 0) s += delim;
-        s += v[i];
-    }
-    return s;
-}
-
-// Sanitise a pipe-unsafe string (replace | with _)
 static string safe(const string& s) {
     string r = s;
     for (char& c : r) if (c == '|') c = '_';
     return r;
 }
 
-    // Returns {count_loaded, total_bytes}
-pair<int,long> loadDirectory(const string& dirPath) {
+void loadSnapshots() {
+    ifstream ifs("snapshots.dat", ios::binary);
+    if (!ifs) return;
+    while (ifs) {
+        Snapshot s;
+        if (!(ifs.read((char*)&s.id, sizeof(s.id)))) break;
+        ifs.read((char*)&s.timestamp, sizeof(s.timestamp));
+        ifs.read((char*)&s.fileCount, sizeof(s.fileCount));
+        ifs.read((char*)&s.totalBytes, sizeof(s.totalBytes));
+        for (int i = 0; i < s.fileCount; i++) {
+            int len; ifs.read((char*)&len, sizeof(len));
+            string path(len, ' '); ifs.read(&path[0], len);
+            long long sz; ifs.read((char*)&sz, sizeof(sz));
+            s.fileMap[path] = sz;
+        }
+        snapshots.push_back(s);
+        if (s.id >= nextSnapshotId) nextSnapshotId = s.id + 1;
+    }
+}
+
+void saveSnapshots() {
+    ofstream ofs("snapshots.dat", ios::binary | ios::trunc);
+    for (const auto& s : snapshots) {
+        ofs.write((char*)&s.id, sizeof(s.id));
+        ofs.write((char*)&s.timestamp, sizeof(s.timestamp));
+        ofs.write((char*)&s.fileCount, sizeof(s.fileCount));
+        ofs.write((char*)&s.totalBytes, sizeof(s.totalBytes));
+        for (auto const& kv : s.fileMap) {
+            string path = kv.first;
+            long long sz = kv.second;
+            int len = path.length();
+            ofs.write((char*)&len, sizeof(len));
+            ofs.write(path.c_str(), len);
+            ofs.write((char*)&sz, sizeof(sz));
+        }
+    }
+}
+
+void sendDiskInfo(const string& path) {
+    long long total = 0, free = 0;
+#ifdef _WIN32
+    ULARGE_INTEGER uFree, uTotal, uTotalFree;
+    if (GetDiskFreeSpaceExA(path.empty() ? NULL : path.c_str(), &uFree, &uTotal, &uTotalFree)) {
+        total = (long long)uTotal.QuadPart;
+        free = (long long)uFree.QuadPart;
+    }
+#else
+    struct statvfs vfs;
+    if (statvfs(path.empty() ? "/" : path.c_str(), &vfs) == 0) {
+        total = (long long)vfs.f_blocks * vfs.f_frsize;
+        free = (long long)vfs.f_bfree * vfs.f_frsize;
+    }
+#endif
+    
+    long long indexedSize = 0;
+    vector<FileNode> all = bpt.getAllLeaves();
+    for(const auto& f : all) indexedSize += f.size;
+
+    cout << "DISK_INFO|" << total << "|" << free << "|" << indexedSize << endl << flush;
+}
+
+// ═══════════════════════════════════
+// CORE SCAN LOGIC
+// ═══════════════════════════════════
+
+pair<int,long> loadDirectory(const string& dirPath, int parentId = 0) {
     int count = 0;
     long totalBytes = 0;
 
+    if (parentId == 0 && scanRoot == "") {
+        scanRoot = dirPath;
+        directoryIds[dirPath] = 0;
+    }
+
 #ifdef _WIN32
-    // Windows: use FindFirstFile / FindNextFile
     string pattern = dirPath + "\\*";
     WIN32_FIND_DATAA ffd;
     HANDLE hFind = FindFirstFileA(pattern.c_str(), &ffd);
     if (hFind == INVALID_HANDLE_VALUE) return {count, totalBytes};
-
     do {
         string fname = ffd.cFileName;
         if (fname == "." || fname == "..") continue;
-        
-        // Skip hidden, system, and junction points (symlinks) to prevent infinite loops on C:\
         if (ffd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | 0x400)) continue;
-
         string fullPath = dirPath + "\\" + fname;
-
         if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            // Recurse
-            auto sub = loadDirectory(fullPath);
-            count     += sub.first;
-            totalBytes += sub.second;
+            int dirId = nextDirId++;
+            directoryIds[fullPath] = dirId;
+            uf.addNode(dirId);
+            uf.unite(dirId, parentId);
+            auto sub = loadDirectory(fullPath, dirId);
+            count += sub.first; totalBytes += sub.second;
         } else {
-            // File
-            LARGE_INTEGER sz;
-            sz.LowPart  = ffd.nFileSizeLow;
-            sz.HighPart = (LONG)ffd.nFileSizeHigh;
-            long fileSize = (long)sz.QuadPart;
-
+            ULARGE_INTEGER ull;
+            ull.LowPart = ffd.ftLastWriteTime.dwLowDateTime;
+            ull.HighPart = ffd.ftLastWriteTime.dwHighDateTime;
+            long ts = (long)((ull.QuadPart - 116444736000000000ULL) / 10000000ULL);
+            long fileSize = (long)(((long long)ffd.nFileSizeHigh << 32) | ffd.nFileSizeLow);
             int id = nextFileId++;
-            int parentId = 1; // assign to /documents by default
-            long ts = (long)time(0);
-
             FileNode f(fname, fullPath, parentId, fileSize, ts);
-            f.id = id;
-            f.modifiedAt = ts;
-
-            bpt.insert(fname, f);
-            trie.insert(fname, f.id);
-            int dayIndex = (ts / 86400) % 365;
-            segTree.addFile(dayIndex, f.size);
-            uf.addNode(f.id);
-            uf.unite(f.id, f.parentId);
-            pds.saveVersion(f);
-            allFileIds.push_back(f.id);
-
-            count++;
-            totalBytes += fileSize;
-            
-            static int lastCount = 0;
-            if (count > 0 && (count % 100 == 0 || count - lastCount >= 50)) {
-                lastCount = count;
-                cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
-            }
+            f.id = id; f.modifiedAt = ts;
+            bpt.insert(fname, f); trie.insert(fname, id);
+            struct tm* ti = localtime(&ts);
+            if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+            uf.addNode(id); uf.unite(id, parentId);
+            pds.saveVersion(f); allFileIds.push_back(id);
+            count++; totalBytes += fileSize;
+            if (count % 100 == 0) cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
         }
     } while (FindNextFileA(hFind, &ffd) != 0);
-
     FindClose(hFind);
-
 #else
-    // POSIX: use opendir/readdir
     DIR* dir = opendir(dirPath.c_str());
     if (!dir) return {count, totalBytes};
-
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         string fname = entry->d_name;
         if (fname == "." || fname == "..") continue;
-
         string fullPath = dirPath + "/" + fname;
-
         struct stat st;
-        if (stat(fullPath.c_str(), &st) != 0) continue;
-
+        if (lstat(fullPath.c_str(), &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            auto sub = loadDirectory(fullPath);
-            count     += sub.first;
-            totalBytes += sub.second;
-        } else {
+            int dirId = nextDirId++;
+            directoryIds[fullPath] = dirId;
+            uf.addNode(dirId);
+            uf.unite(dirId, parentId);
+            auto sub = loadDirectory(fullPath, dirId);
+            count += sub.first; totalBytes += sub.second;
+        } else if (S_ISREG(st.st_mode)) {
             long fileSize = (long)st.st_size;
+            long ts = (long)st.st_mtime;
             int id = nextFileId++;
-            int parentId = 1;
-            long ts = (long)time(0);
-
             FileNode f(fname, fullPath, parentId, fileSize, ts);
-            f.id = id;
-            f.modifiedAt = ts;
-
-            bpt.insert(fname, f);
-            trie.insert(fname, f.id);
-            int dayIndex = (ts / 86400) % 365;
-            segTree.addFile(dayIndex, f.size);
-            uf.addNode(f.id);
-            uf.unite(f.id, f.parentId);
-            pds.saveVersion(f);
-            allFileIds.push_back(f.id);
-
-            count++;
-            totalBytes += fileSize;
-            
-            static int lastCountPosix = 0;
-            if (count > 0 && (count % 100 == 0 || count - lastCountPosix >= 50)) {
-                lastCountPosix = count;
-                cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
-            }
+            f.id = id; f.modifiedAt = ts;
+            bpt.insert(fname, f); trie.insert(fname, id);
+            struct tm* ti = localtime(&ts);
+            if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+            uf.addNode(id); uf.unite(id, parentId);
+            pds.saveVersion(f); allFileIds.push_back(id);
+            count++; totalBytes += fileSize;
+            if (count % 100 == 0) cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
         }
     }
     closedir(dir);
 #endif
-
     return {count, totalBytes};
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// MACHINE MODE — command processor
-// ═══════════════════════════════════════════════════════════════════
-
-// Month name mapping for output
-static const string MONTH_NAMES[12] = {
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
-};
-static const int MONTH_START_DAYS[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
-static const int MONTH_END_DAYS[12]   = {30,58,89,119,150,180,211,242,272,303,333,364};
+// ═══════════════════════════════════
+// MACHINE MODE
+// ═══════════════════════════════════
 
 void runMachineMode() {
     string line;
     while (getline(cin, line)) {
-        // Trim trailing \r on Windows
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) continue;
-
         istringstream iss(line);
-        string cmd;
-        iss >> cmd;
+        string cmd; iss >> cmd;
 
-        // ── EXIT ────────────────────────────────────────────────────
-        if (cmd == "EXIT") {
-            cout << "BYE" << endl << flush;
-            return;
+        if (cmd == "EXIT") { cout << "BYE" << endl << flush; return; }
+        else if (cmd == "DISK_INFO") { sendDiskInfo(scanRoot); }
+        else if (cmd == "SNAPSHOT") {
+            vector<FileNode> all = bpt.getAllLeaves();
+            Snapshot s;
+            s.id = nextSnapshotId++;
+            s.timestamp = time(0);
+            s.fileCount = all.size();
+            s.totalBytes = 0;
+            for (const auto& f : all) {
+                s.totalBytes += f.size;
+                s.fileMap[f.path] = f.size;
+            }
+            snapshots.push_back(s);
+            saveSnapshots();
+            cout << "SNAPSHOT_OK|" << s.id << "|" << s.fileCount << "|" << s.totalBytes << endl << flush;
         }
-
-        // ── LOAD_DIR <path> ─────────────────────────────────────────
+        else if (cmd == "DIFF") {
+            int id1, id2; if (!(iss >> id1 >> id2)) { cout << "ERROR|DIFF|args" << endl << flush; continue; }
+            Snapshot *s1 = nullptr, *s2 = nullptr;
+            for (auto& s : snapshots) {
+                if (s.id == id1) s1 = &s;
+                if (s.id == id2) s2 = &s;
+            }
+            if (!s1 || !s2) { cout << "ERROR|DIFF|not_found" << endl << flush; continue; }
+            
+            int added = 0, deleted = 0, modified = 0, unchanged = 0;
+            for (auto const& kv : s2->fileMap) {
+                if (s1->fileMap.find(kv.first) == s1->fileMap.end()) added++;
+                else if (s1->fileMap[kv.first] != kv.second) modified++;
+                else unchanged++;
+            }
+            for (auto const& kv : s1->fileMap) {
+                if (s2->fileMap.find(kv.first) == s2->fileMap.end()) deleted++;
+            }
+            cout << "DIFF_RESULT|" << added << "|" << deleted << "|" << modified << "|" << unchanged << endl << flush;
+        }
+        else if (cmd == "WARNINGS") {
+            vector<FileNode> all = bpt.getAllLeaves();
+            map<string, vector<FileNode>> groups;
+            for (const auto& f : all) groups[f.checksum].push_back(f);
+            long long dupeWaste = 0;
+            for (const auto& g : groups) if (g.second.size() > 1) dupeWaste += (long long)(g.second.size() - 1) * g.second[0].size;
+            if (dupeWaste > 500 * 1048576LL) cout << "WARN|DUPLICATES|Duplicate files wasting " << (dupeWaste / 1048576) << " MB" << endl;
+            long long oldWaste = 0;
+            long long twoYearsAgo = time(0) - (2LL * 365 * 86400);
+            for (const auto& f : all) if (f.modifiedAt < twoYearsAgo) oldWaste += f.size;
+            if (oldWaste > 1024 * 1048576LL) cout << "WARN|OLD_FILES|Files >2yrs occupy " << (oldWaste / 1048576) << " MB" << endl;
+            cout << "WARNINGS_DONE" << endl << flush;
+        }
+        else if (cmd == "RECLAIM") {
+            vector<FileNode> all = bpt.getAllLeaves();
+            long long oneYearAgo = time(0) - (365LL * 86400);
+            long long totalRec = 0;
+            map<string, vector<FileNode>> groups;
+            for (const auto& f : all) groups[f.checksum].push_back(f);
+            long long dupeRec = 0;
+            for (const auto& g : groups) if (g.second.size() > 1) dupeRec += (long long)(g.second.size() - 1) * g.second[0].size;
+            cout << "REC|DUPLICATES|" << dupeRec << endl; totalRec += dupeRec;
+            long long oldRec = 0;
+            for (const auto& f : all) if (f.modifiedAt < oneYearAgo) oldRec += f.size;
+            cout << "REC|OLD_FILES|" << oldRec << endl; totalRec += oldRec;
+            for (const auto& f : all) if (f.size > 100 * 1048576LL) cout << "REC|LARGE_FILE|" << safe(f.name) << "|" << f.size << "|" << safe(f.path) << endl;
+            cout << "RECLAIM_DONE|" << totalRec << endl << flush;
+        }
+        else if (cmd == "DELETE") {
+            int fid = -1; iss >> fid;
+            vector<FileNode> all = bpt.getAllLeaves();
+            bool found = false;
+            for (const auto& f : all) if (f.id == fid) {
+                if (remove(f.path.c_str()) == 0) { bpt.remove(f.name); trie.remove(f.name); cout << "DELETE_OK|" << fid << endl; }
+                else cout << "ERROR|DELETE|failed" << endl;
+                found = true; break;
+            }
+            if(!found) cout << "ERROR|DELETE|not_found" << endl;
+            cout << flush;
+        }
         else if (cmd == "LOAD_DIR") {
-            string path;
-            getline(iss >> ws, path);
-            if (path.empty()) {
-                cout << "ERROR|LOAD_DIR|no path provided" << endl << flush;
-                continue;
-            }
-            try {
-                pair<int,long> ldResult = loadDirectory(path);
-                cout << "LOADED|" << ldResult.first << "|" << ldResult.second << endl << flush;
-            } catch (...) {
-                cout << "ERROR|LOAD_DIR|exception during directory scan" << endl << flush;
-            }
+            string path; getline(iss >> ws, path);
+            if (path.empty()) { cout << "ERROR|LOAD_DIR|no path" << endl << flush; continue; }
+            auto res = loadDirectory(path);
+            cout << "LOADED|" << res.first << "|" << res.second << endl << flush;
         }
-
-        // ── LOAD_RECORD <name>|<path>|<size_bytes>|<modified_ts> ────
-        // Inserts a pre-scanned file record directly — no filesystem walk.
-        // Used by the Python GUI to replay the SQLite cache on startup.
-        else if (cmd == "LOAD_RECORD") {
-            string rest;
-            getline(iss >> ws, rest);
-            // Parse pipe-delimited fields
-            vector<string> fields;
-            stringstream ss2(rest);
-            string tok;
-            while (getline(ss2, tok, '|')) fields.push_back(tok);
-            if (fields.size() < 2) {
-                cout << "ERROR|LOAD_RECORD|need name|path" << endl << flush;
-                continue;
-            }
-            string fname    = fields[0];
-            string fpath    = fields[1];
-            long   fsize    = fields.size() > 2 ? stol(fields[2]) : 0;
-            long   fmod     = fields.size() > 3 ? stol(fields[3]) : 0;
-
-            FileNode node(fname, fpath, 0, fsize, fmod);
-            node.id         = nextFileId++;
-            node.modifiedAt = fmod;
-            node.checksum   = to_string(fsize) + fname.substr(0, min(3, (int)fname.size()));
-
-            bpt.insert(fname, node);
-            trie.insert(fname, node.id);
-            if (fmod > 0) {
-                struct tm* t = localtime(&fmod);
-                if (t) {
-                    int day = t->tm_yday + 1;
-                    segTree.addFile(day, fsize);
-                }
-            }
-            allFileIds.push_back(node.id);
-            cout << "REC_OK|" << node.id << endl << flush;
+        else if (cmd == "ROLLBACK") {
+            int fid, ver; if (!(iss >> fid >> ver)) { cout << "ROLLBACK_ERROR|args" << endl << flush; continue; }
+            if (pds.rollback(fid, ver, bpt)) cout << "ROLLBACK_OK|" << fid << "|" << ver << endl << flush;
+            else cout << "ROLLBACK_ERROR|failed" << endl << flush;
         }
-
-        // ── LOAD_BATCH_BEGIN / LOAD_BATCH_END ────────────────────────
-        // Accepts many LOAD_RECORD lines bracketed by these markers.
-        // Returns BATCH_DONE|count at the end.
-        else if (cmd == "LOAD_BATCH_BEGIN") {
-            int batchCount = 0;
-            string bline;
-            while (getline(cin, bline)) {
-                if (!bline.empty() && bline.back() == '\r') bline.pop_back();
-                if (bline == "LOAD_BATCH_END") break;
-                // Each line is: name|path|size|modified
-                vector<string> fields;
-                stringstream ss3(bline);
-                string tok3;
-                while (getline(ss3, tok3, '|')) fields.push_back(tok3);
-                if (fields.size() < 2) continue;
-                string fname = fields[0];
-                string fpath = fields[1];
-                long fsize   = fields.size() > 2 ? stol(fields[2]) : 0;
-                long fmod    = fields.size() > 3 ? stol(fields[3]) : 0;
-                FileNode node(fname, fpath, 0, fsize, fmod);
-                node.id  = nextFileId++;
-                node.modifiedAt = fmod;
-                node.checksum = to_string(fsize) + fname.substr(0, min(3, (int)fname.size()));
-                bpt.insert(fname, node);
-                trie.insert(fname, node.id);
-                if (fmod > 0) {
-                    struct tm* t = localtime(&fmod);
-                    if (t) {
-                        int day = t->tm_yday + 1;
-                        segTree.addFile(day, fsize);
-                    }
-                }
-                allFileIds.push_back(node.id);
-                batchCount++;
-            }
-            cout << "BATCH_DONE|" << batchCount << endl << flush;
-        }
-
-        // ── GENERATE <count> ────────────────────────────────────────
-        else if (cmd == "GENERATE") {
-            int n = 0;
-            iss >> n;
-            if (n <= 0) {
-                cout << "ERROR|GENERATE|invalid count" << endl << flush;
-                continue;
-            }
-            // Suppress generateData()'s cout by redirecting stdout temporarily
-            // We simply call it and ignore its prints (they go to stdout pre-flush).
-            // Since machine mode must not print banners, we redirect.
-            // Simplest safe approach: call generateData and let its prints happen
-            // (they are informational messages during generation).
-            // Per spec: output only the final structured line.
-            // We save/restore cout stream buffer.
-            streambuf* oldBuf = cout.rdbuf(nullptr); // suppress generateData output
-            generateData(n);
-            cout.rdbuf(oldBuf); // restore
-            cout << "GENERATED|" << n << endl << flush;
-        }
-
-        // ── SEARCH <filename> ────────────────────────────────────────
         else if (cmd == "SEARCH") {
-            string filename;
-            iss >> filename;
-            if (filename.empty()) {
-                cout << "ERROR|SEARCH|no filename provided" << endl << flush;
-                continue;
-            }
-
-            QueryResult qr = classify(filename);
-            pair<FileNode*, string> swpResult = bpt.searchWithPath(filename);
-            FileNode* node  = swpResult.first;
-            string    tpath = swpResult.second;
-
-            // Count hops from path string
-            int hops = 0;
-            {
-                size_t pos = tpath.find('[');
-                if (pos != string::npos) {
-                    sscanf(tpath.c_str() + pos + 1, "%d", &hops);
-                }
-            }
-
-            if (node) {
-                cout << "RESULT|FOUND"
-                     << "|" << safe(node->name)
-                     << "|" << safe(node->path)
-                     << "|" << node->size / 1024
-                     << "|" << qr.dsName
-                     << "|" << safe(tpath)
-                     << "|" << hops
-                     << "|" << safe(qr.reason)
-                     << endl << flush;
-            } else {
-                cout << "RESULT|NOT_FOUND"
-                     << "|" << safe(filename)
-                     << "|"
-                     << "|"
-                     << "|" << qr.dsName
-                     << "|"
-                     << "|" << hops
-                     << "|" << safe(qr.reason)
-                     << endl << flush;
-            }
+            string filename; iss >> filename;
+            FileNode* node = bpt.search(filename);
+            if (node) cout << "RESULT|FOUND|" << safe(node->name) << "|" << safe(node->path) << "|" << node->size / 1024 << "|Engine|" << safe(node->path) << "|0|Direct" << endl << flush;
+            else cout << "RESULT|NOT_FOUND|" << safe(filename) << "|||Engine||0|Direct" << endl << flush;
         }
-
-        // ── PREFIX <prefix> ─────────────────────────────────────────
-        else if (cmd == "PREFIX") {
-            string prefix;
-            iss >> prefix;
-            if (prefix.empty()) {
-                cout << "ERROR|PREFIX|no prefix provided" << endl << flush;
-                continue;
-            }
-
-            pair<vector<string>, string> pswpResult = trie.prefixSearchWithPath(prefix);
-            vector<string> names = pswpResult.first;
-            string         tpath = pswpResult.second;
-            QueryResult qr = classify(prefix + "*");
-
-            cout << "RESULT|PREFIX"
-                 << "|" << joinStrings(names)
-                 << "|" << safe(tpath)
-                 << "|" << names.size()
-                 << "|" << safe(qr.reason)
-                 << endl << flush;
-        }
-
-        // ── SIZE_RANGE <min_kb> <max_kb> ─────────────────────────────
-        else if (cmd == "SIZE_RANGE") {
-            long minKB = 0, maxKB = 0;
-            if (!(iss >> minKB >> maxKB) || minKB < 0 || maxKB < 0) {
-                cout << "ERROR|SIZE_RANGE|invalid arguments" << endl << flush;
-                continue;
-            }
-
-            vector<FileNode> results = bpt.searchBySize(minKB * 1024, maxKB * 1024);
-            vector<string> names;
-            for (const auto& f : results) names.push_back(f.name);
-
-            QueryResult qr = classify("size:" + to_string(minKB) + "-" + to_string(maxKB));
-
-            cout << "RESULT|SIZE"
-                 << "|" << joinStrings(names)
-                 << "|" << results.size()
-                 << "|SegmentTree"
-                 << "|" << safe(qr.reason)
-                 << endl << flush;
-        }
-
-        // ── DATE_RANGE <month_start> <month_end> ─────────────────────
-        else if (cmd == "DATE_RANGE") {
-            int m1 = 0, m2 = 0;
-            if (!(iss >> m1 >> m2) || m1 < 1 || m1 > 12 || m2 < 1 || m2 > 12 || m1 > m2) {
-                cout << "ERROR|DATE_RANGE|month values must be 1-12 and start<=end" << endl << flush;
-                continue;
-            }
-
-            int dayStart = MONTH_START_DAYS[m1 - 1];
-            int dayEnd   = MONTH_END_DAYS[m2 - 1];
-            long bytes   = segTree.queryRange(dayStart, dayEnd);
-            double mb    = bytes / 1048576.0;
-
-            cout << "RESULT|DATE"
-                 << "|" << fixed << setprecision(2) << mb
-                 << "|" << m1
-                 << "|" << m2
-                 << "|SegmentTree"
-                 << endl << flush;
-        }
-
-        // ── DUPLICATES ───────────────────────────────────────────────
         else if (cmd == "DUPLICATES") {
             vector<FileNode> all = bpt.getAllLeaves();
             map<string, vector<FileNode>> groups;
             for (const auto& f : all) groups[f.checksum].push_back(f);
-
-            int groupCount = 0;
-            double totalWastedMB = 0.0;
-
-            for (const auto& kv : groups) {
-                if (kv.second.size() <= 1) continue;
-                groupCount++;
-                const auto& files = kv.second;
-                long wastedKB = (long)(files.size() - 1) * files[0].size / 1024;
-                totalWastedMB += wastedKB / 1024.0;
-
-                vector<string> paths;
-                for (const auto& f : files) paths.push_back(f.path);
-
-                cout << "DUP"
-                     << "|" << safe(files[0].name)
-                     << "|" << safe(kv.first)
-                     << "|" << joinStrings(paths)
-                     << "|" << wastedKB
-                     << endl << flush;
-            }
-
-            cout << "DUP_DONE"
-                 << "|" << groupCount
-                 << "|" << fixed << setprecision(2) << totalWastedMB
-                 << endl << flush;
-        }
-
-        // ── ORPHANS ───────────────────────────────────────────────────
-        else if (cmd == "ORPHANS") {
-            vector<int> orphans = uf.findAllOrphans(0, allFileIds);
-            vector<FileNode> allLeaves = bpt.getAllLeaves();
-            long totalSize = 0;
-
-            for (int id : orphans) {
-                for (const auto& f : allLeaves) {
-                    if (f.id == id) {
-                        cout << "ORPHAN"
-                             << "|" << f.id
-                             << "|" << safe(f.name)
-                             << "|" << safe(f.path)
-                             << "|" << f.size / 1024
-                             << endl << flush;
-                        totalSize += f.size;
-                        break;
-                    }
+            int count = 0; long long total = 0;
+            for (const auto& g : groups) {
+                if (g.second.size() > 1) {
+                    count++; total += (long long)(g.second.size()-1) * g.second[0].size;
+                    string paths = "";
+                    for(const auto& f : g.second) paths += safe(f.path) + ",";
+                    cout << "DUP|" << safe(g.second[0].name) << "|" << safe(g.first) << "|" << paths << "|" << g.second[0].size/1024 << endl;
                 }
             }
-
-            cout << "ORPHAN_DONE"
-                 << "|" << orphans.size()
-                 << "|" << fixed << setprecision(2) << (totalSize / 1048576.0)
-                 << endl << flush;
+            cout << "DUP_DONE|" << count << "|" << total/1048576.0 << endl << flush;
         }
-
-        // ── ANALYTICS ─────────────────────────────────────────────────
+        else if (cmd == "ORPHANS") {
+            vector<int> orphans = uf.findAllOrphans(0, allFileIds);
+            vector<FileNode> all = bpt.getAllLeaves();
+            long long total = 0;
+            for (int id : orphans) for (const auto& f : all) if (f.id == id) {
+                cout << "ORPHAN|" << f.id << "|" << safe(f.name) << "|" << safe(f.path) << "|" << f.size/1024 << endl;
+                total += f.size; break;
+            }
+            cout << "ORPHAN_DONE|" << orphans.size() << "|" << total/1048576.0 << endl << flush;
+        }
         else if (cmd == "ANALYTICS") {
-            double totalMB = 0.0;
             for (int i = 0; i < 12; i++) {
-                long bytes = segTree.queryRange(MONTH_START_DAYS[i], MONTH_END_DAYS[i]);
-                double mb = bytes / 1048576.0;
-                totalMB += mb;
-                cout << "MONTH"
-                     << "|" << MONTH_NAMES[i]
-                     << "|" << fixed << setprecision(2) << mb
-                     << endl << flush;
+                const string months[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+                const int starts[] = {0,31,59,90,120,151,181,212,243,273,304,334};
+                const int ends[] = {30,58,89,119,150,180,211,242,272,303,333,364};
+                cout << "MONTH|" << months[i] << "|" << fixed << setprecision(2) << segTree.queryRange(starts[i], ends[i])/1048576.0 << endl;
             }
-            cout << "ANALYTICS_DONE"
-                 << "|" << fixed << setprecision(2) << totalMB
-                 << endl << flush;
+            cout << "ANALYTICS_DONE|0" << endl << flush;
         }
-
-        // ── VERSION_HISTORY <file_id> ─────────────────────────────────
         else if (cmd == "VERSION_HISTORY") {
-            int fid = -1;
-            iss >> fid;
-            if (fid < 0) {
-                cout << "ERROR|VERSION_HISTORY|invalid file id" << endl << flush;
-                continue;
-            }
-            if (!pds.hasHistory(fid)) {
-                cout << "VERSION_DONE|0" << endl << flush;
-                continue;
-            }
-
-            int count = 0;
-            // Access versions via getVersion(fid, verNum) — iterate until not found
+            int fid; iss >> fid;
             for (int v = 1; ; v++) {
                 FileNode fn = pds.getVersion(fid, v);
                 if (fn.id == -1) break;
-                cout << "RESULT|VERSION"
-                     << "|" << fid
-                     << "|" << v
-                     << "|" << safe(fn.name)
-                     << "|" << safe(fn.path)
-                     << "|" << fn.parentId
-                     << "|" << fn.size
-                     << "|" << fn.modifiedAt
-                     << endl << flush;
-                count++;
+                cout << "RESULT|VERSION|" << fid << "|" << v << "|" << safe(fn.name) << "|" << safe(fn.path) << "|" << fn.parentId << "|" << fn.size << "|" << fn.modifiedAt << endl;
             }
-            cout << "VERSION_DONE|" << count << endl << flush;
-        }
-
-        // ── BENCHMARK ─────────────────────────────────────────────────
-        else if (cmd == "BENCHMARK") {
-            using namespace std::chrono;
-
-            // Suppress generateData output during benchmark
-            streambuf* oldBuf = cout.rdbuf(nullptr);
-            generateData(10000);
-            cout.rdbuf(oldBuf);
-
-            vector<FileNode> all = bpt.getAllLeaves();
-            if (all.empty()) {
-                cout << "ERROR|BENCHMARK|no data available" << endl << flush;
-                continue;
-            }
-
-            // TEST 1 — Search
-            auto t0 = high_resolution_clock::now();
-            for (int i = 0; i < 1000; i++) bpt.search(all[rand() % all.size()].name);
-            auto t1 = high_resolution_clock::now();
-            long bptSearch = duration_cast<microseconds>(t1 - t0).count();
-
-            t0 = high_resolution_clock::now();
-            for (int i = 0; i < 1000; i++) {
-                string sn = all[rand() % all.size()].name;
-                for (const auto& f : all) { if (f.name == sn) break; }
-            }
-            t1 = high_resolution_clock::now();
-            long linSearch = duration_cast<microseconds>(t1 - t0).count();
-
-            double sp1 = bptSearch > 0 ? (double)linSearch / bptSearch : 0.0;
-            cout << "BENCH|Search(1000ops)|" << bptSearch << "|" << linSearch
-                 << "|" << fixed << setprecision(2) << sp1 << endl << flush;
-
-            // TEST 2 — Range search
-            t0 = high_resolution_clock::now();
-            for (int i = 0; i < 100; i++) bpt.rangeSearch("a", "m");
-            t1 = high_resolution_clock::now();
-            long bptRange = duration_cast<microseconds>(t1 - t0).count();
-
-            t0 = high_resolution_clock::now();
-            for (int i = 0; i < 100; i++) {
-                vector<FileNode> r;
-                for (const auto& f : all) if (f.name >= "a" && f.name <= "m") r.push_back(f);
-            }
-            t1 = high_resolution_clock::now();
-            long linRange = duration_cast<microseconds>(t1 - t0).count();
-
-            double sp2 = bptRange > 0 ? (double)linRange / bptRange : 0.0;
-            cout << "BENCH|Range(100ops)|" << bptRange << "|" << linRange
-                 << "|" << fixed << setprecision(2) << sp2 << endl << flush;
-
-            // TEST 3 — Prefix search
-            t0 = high_resolution_clock::now();
-            for (int i = 0; i < 1000; i++) trie.prefixSearch("rep");
-            t1 = high_resolution_clock::now();
-            long triePrefix = duration_cast<microseconds>(t1 - t0).count();
-
-            t0 = high_resolution_clock::now();
-            for (int i = 0; i < 1000; i++) {
-                vector<FileNode> r;
-                for (const auto& f : all) if (f.name.size() >= 3 && f.name.substr(0,3) == "rep") r.push_back(f);
-            }
-            t1 = high_resolution_clock::now();
-            long linPrefix = duration_cast<microseconds>(t1 - t0).count();
-
-            double sp3 = triePrefix > 0 ? (double)linPrefix / triePrefix : 0.0;
-            cout << "BENCH|Prefix(1000ops)|" << triePrefix << "|" << linPrefix
-                 << "|" << fixed << setprecision(2) << sp3 << endl << flush;
-
-            cout << "BENCH_DONE" << endl << flush;
-        }
-
-        // ── UNKNOWN ───────────────────────────────────────────────────
-        else {
-            cout << "ERROR|" << safe(cmd) << "|unknown command" << endl << flush;
+            cout << "VERSION_DONE|0" << endl << flush;
         }
     }
 }
 
 // ═══════════════════════════════════
-// MAIN FUNCTION
+// MAIN
 // ═══════════════════════════════════
+
 int main(int argc, char* argv[]) {
-    // Folder nodes in UnionFind setup
     uf.addNode(0);
-    uf.addNode(1); uf.unite(1, 0);
-    uf.addNode(2); uf.unite(2, 0);
-    uf.addNode(3); uf.unite(3, 0);
-    uf.addNode(4); uf.unite(4, 0);
-
-    // Check for --machine flag
-    bool machineMode = false;
-    for (int i = 1; i < argc; i++) {
-        if (string(argv[i]) == "--machine") {
-            machineMode = true;
-            break;
-        }
-    }
-
-    if (machineMode) {
-        // Suppress all DS couts in machine mode by redirecting stderr-only
-        // (generateData / pds.saveVersion print to cout — handled per command)
-        runMachineMode();
-        return 0;
-    }
-
-    // ── Normal menu mode (unchanged behaviour) ───────────────────────
-    printBanner();
-    cout << "Welcome! Type 11 to generate test data first." << endl;
-    
-    int choice = -1;
-    do {
-        printMenu();
-        if (!(cin >> choice)) {
-            cin.clear();
-            cin.ignore(1000, '\n');
-            cout << "Invalid input. Enter a number." << endl;
-            continue;
-        }
-        cin.ignore(1000, '\n'); // clear newline after valid integer input
-        cout << endl; // space for readability
-        
-        switch(choice) {
-            case 1:  addFile(); break;
-            case 2:  deleteFile(); break;
-            case 3:  searchPrefix(); break;
-            case 4:  searchBySize(); break;
-            case 5:  storageAnalytics(); break;
-            case 6:  findDuplicates(); break;
-            case 7:  showVersionHistory(); break;
-            case 8:  editFile(); break;
-            case 9:  rollbackFile(); break;
-            case 10: detectOrphans(); break;
-            case 11: generateData(10000); break;
-            case 12: benchmark(); break;
-            case 13: stressTest(); break;
-            case 14: showSystemInfo(); break;
-            case 0:  cout << "Goodbye!" << endl; break;
-            default: cout << "Invalid option. Try again." << endl;
-        }
-    } while(choice != 0);
-
+    loadSnapshots();
+    bool machine = false;
+    for (int i = 1; i < argc; i++) if (string(argv[i]) == "--machine") machine = true;
+    if (machine) { runMachineMode(); return 0; }
+    cout << "Menu mode disabled. Use --machine." << endl;
     return 0;
 }

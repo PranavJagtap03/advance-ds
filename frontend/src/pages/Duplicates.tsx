@@ -1,107 +1,183 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useEngine } from '../contexts/EngineContext';
-import { Copy, Trash2, Cpu } from 'lucide-react';
+import { Copy, Trash2, Zap, AlertCircle, HardDrive, History, FileWarning } from 'lucide-react';
 
-interface DupGroup {
+interface ReclaimAction {
+    type: 'DUPLICATES' | 'OLD_FILES' | 'LARGE_FILE';
+    label: string;
+    size: number;
+    path?: string;
+    id?: number;
+}
+
+interface DuplicateGroup {
+    name: string;
     hash: string;
-    count: number;
+    sizeKB: number;
     paths: string[];
 }
 
 const Duplicates = () => {
     const { sendCommand, subscribe } = useEngine();
-    const [groups, setGroups] = useState<DupGroup[]>([]);
+    const [reclaimActions, setReclaimActions] = useState<ReclaimAction[]>([]);
+    const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([]);
+    const [totalReclaimable, setTotalReclaimable] = useState(0);
     const [loading, setLoading] = useState(false);
-    
-    // To buffer the current group paths being built
-    const [currentGroupHash, setCurrentGroupHash] = useState<string | null>(null);
 
     useEffect(() => {
-        let activeGroups: DupGroup[] = [];
-        let curGroup: DupGroup | null = null;
-        
-        const unsub = subscribe('duplicates', (line, type) => {
-            if (line.startsWith('DUP_DONE')) {
-                setGroups([...activeGroups]);
-                setLoading(false);
-            } 
-            else if (line.startsWith('DUP|')) {
+        const unsub = subscribe('duplicates', (line) => {
+            if (line.startsWith('REC|')) {
                 const parts = line.split('|');
-                const pathsStr = parts[5] || '';
-                activeGroups.push({
-                    hash: parts[2] || 'unknown',
-                    count: parseInt(parts[4] || '0', 10),
-                    paths: pathsStr ? pathsStr.split(',') : []
-                });
+                const type = parts[1] as any;
+                if (type === 'LARGE_FILE') {
+                    setReclaimActions(prev => [...prev, {
+                        type,
+                        label: parts[2],
+                        size: parseInt(parts[3]),
+                        path: parts[4]
+                    }]);
+                } else {
+                    setReclaimActions(prev => [...prev, {
+                        type,
+                        label: type === 'DUPLICATES' ? 'Duplicate Content' : 'Files older than 1 year',
+                        size: parseInt(parts[2])
+                    }]);
+                }
             }
-            else if (line.startsWith('RESULT|NOT_FOUND')) {
-                 setLoading(false);
+            if (line.startsWith('RECLAIM_DONE')) {
+                const total = parseInt(line.split('|')[1]);
+                setTotalReclaimable(total);
+                setLoading(false);
+            }
+            if (line.startsWith('DUP|')) {
+                const parts = line.split('|');
+                setDuplicateGroups(prev => [...prev, {
+                    name: parts[1],
+                    hash: parts[2],
+                    paths: parts[3].split(',').filter(p => p),
+                    sizeKB: parseInt(parts[4])
+                }]);
             }
         });
 
+        // Initial fetch
+        refresh();
         return () => unsub();
     }, [subscribe]);
 
-    const runScan = () => {
-        setGroups([]);
+    const refresh = () => {
         setLoading(true);
+        setReclaimActions([]);
+        setDuplicateGroups([]);
+        sendCommand('RECLAIM', 'duplicates');
         sendCommand('DUPLICATES', 'duplicates');
     };
 
+    const formatMB = (bytes: number) => (bytes / 1048576).toFixed(1) + ' MB';
+
     return (
-        <div className="flex flex-col h-full gap-6">
-            <header className="flex justify-between items-end">
+        <div className="flex flex-col h-full gap-8">
+            <header className="flex justify-between items-start">
                 <div>
-                    <h1 className="font-h1 text-on-surface">Duplicate Clusters</h1>
-                    <p className="text-on-surface-variant font-body-md mt-1">
-                        Identify redundant files matching the exact data characteristics safely via checksum hashing.
-                    </p>
+                    <h1 className="text-2xl font-bold text-on-surface">Free Up Space</h1>
+                    <p className="text-on-surface-variant text-sm mt-1">Optimize your storage by removing redundant or obsolete files.</p>
                 </div>
                 <button 
-                    onClick={runScan}
+                    onClick={refresh}
                     disabled={loading}
-                    className="bg-primary text-on-primary px-4 py-2 rounded-md font-label-md tracking-wider hover:bg-primary-container hover:text-on-primary-container shadow-sm disabled:opacity-50 flex items-center gap-2"
+                    className="flex items-center gap-2 bg-primary text-on-primary px-5 py-2.5 rounded-xl font-bold hover:brightness-110 transition-all shadow-md disabled:opacity-50"
                 >
-                    <Cpu className="w-4 h-4"/> {loading ? 'ANALYZING...' : 'RUN CLUSTER SCAN'}
+                    <Zap className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                    {loading ? 'ANALYZING...' : 'REFRESH ADVISOR'}
                 </button>
             </header>
 
-            {!loading && groups.length === 0 && (
-                <div className="flex-1 flex items-center justify-center border-2 border-dashed border-outline-variant/30 rounded-xl bg-surface-container-lowest/50">
-                    <div className="text-center">
-                        <Copy className="mx-auto w-12 h-12 text-outline-variant/50 mb-3" />
-                        <h3 className="font-h3 text-on-surface">Zero Clusters Found</h3>
-                        <p className="text-sm font-sans text-on-surface-variant">Run a scan to detect duplicate content blocks.</p>
+            {/* Reclaim advisor summary */}
+            <div className="bg-primary/5 border border-primary/20 rounded-3xl p-8 flex flex-col md:flex-row items-center gap-8 shadow-sm">
+                <div className="flex-1 text-center md:text-left">
+                    <p className="text-xs font-black text-primary uppercase tracking-widest mb-2">Total Reclaimable Space</p>
+                    <h2 className="text-5xl font-black text-on-surface">
+                        {formatMB(totalReclaimable)}
+                    </h2>
+                    <p className="text-on-surface-variant mt-4 text-sm leading-relaxed max-w-md">
+                        We've identified potential savings across duplicates and old files. Cleaning these up will improve your system performance.
+                    </p>
+                </div>
+                <div className="grid grid-cols-2 gap-4 w-full md:w-auto">
+                    <div className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 shadow-sm flex flex-col items-center justify-center min-w-[140px]">
+                        <Copy className="text-blue-500 w-5 h-5 mb-2" />
+                        <p className="text-[10px] font-bold text-outline uppercase">Duplicates</p>
+                        <p className="text-lg font-black text-on-surface">
+                            {formatMB(reclaimActions.find(a => a.type === 'DUPLICATES')?.size || 0)}
+                        </p>
+                    </div>
+                    <div className="bg-surface-container-lowest p-4 rounded-2xl border border-outline-variant/20 shadow-sm flex flex-col items-center justify-center min-w-[140px]">
+                        <History className="text-orange-500 w-5 h-5 mb-2" />
+                        <p className="text-[10px] font-bold text-outline uppercase">Old Files</p>
+                        <p className="text-lg font-black text-on-surface">
+                            {formatMB(reclaimActions.find(a => a.type === 'OLD_FILES')?.size || 0)}
+                        </p>
                     </div>
                 </div>
-            )}
+            </div>
 
-            <div className="flex-1 overflow-auto -mx-2 px-2 custom-scrollbar space-y-6">
-                {groups.map((g, i) => (
-                    <div key={i} className="bg-surface-container-lowest border border-outline-variant/20 rounded-xl overflow-hidden shadow-sm">
-                        <div className="bg-surface-container py-3 px-4 flex justify-between items-center border-b border-outline-variant/10">
-                            <div className="flex items-center gap-3">
-                                <span className="p-1.5 bg-primary/10 text-primary rounded-md">
-                                    <Copy className="w-4 h-4" />
-                                </span>
-                                <h4 className="font-label-md tracking-widest text-on-surface-variant uppercase">Cluster {g.hash.substring(0,8)}...</h4>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 flex-1 overflow-hidden">
+                {/* Advisor List */}
+                <section className="flex flex-col gap-4 overflow-hidden">
+                    <h3 className="text-sm font-black text-outline uppercase tracking-widest flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-primary" /> Reclaim Advisor
+                    </h3>
+                    <div className="flex-1 overflow-auto space-y-3 custom-scrollbar pr-2">
+                        {reclaimActions.filter(a => a.type === 'LARGE_FILE').map((a, i) => (
+                            <div key={i} className="bg-surface-container-lowest border border-outline-variant/10 p-4 rounded-2xl flex justify-between items-center group hover:border-primary/20 transition-all">
+                                <div className="flex items-center gap-4 overflow-hidden">
+                                    <div className="p-3 bg-error/5 text-error rounded-xl">
+                                        <FileWarning className="w-5 h-5" />
+                                    </div>
+                                    <div className="overflow-hidden">
+                                        <p className="text-xs font-bold text-error uppercase mb-0.5 tracking-tight">Large File Found</p>
+                                        <h4 className="font-bold text-sm text-on-surface truncate">{a.label}</h4>
+                                        <p className="text-[10px] text-on-surface-variant font-mono truncate">{a.path}</p>
+                                    </div>
+                                </div>
+                                <div className="text-right flex-shrink-0 ml-4">
+                                    <p className="text-sm font-black text-on-surface">{formatMB(a.size)}</p>
+                                    <button className="text-[10px] font-black text-error hover:underline mt-1">DELETE</button>
+                                </div>
                             </div>
-                            <span className="text-xs font-mono font-bold text-on-surface px-2 py-1 bg-surface-variant rounded-md border border-outline-variant/30">
-                                {g.paths.length} copies
-                            </span>
-                        </div>
-                        <ul className="divide-y divide-outline-variant/10">
-                            {g.paths.map((p, j) => (
-                                <li key={j} className="flex justify-between flex-wrap gap-2 items-center px-4 py-3 hover:bg-surface-variant/30 transition-colors">
-                                    <span className="text-sm font-sans text-on-surface truncate break-all block flex-1">{p}</span>
-                                    <button className="text-error opacity-60 hover:opacity-100 transition-opacity p-2 hover:bg-error-container rounded-md">
-                                        <Trash2 className="w-4 h-4" />
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
+                        ))}
                     </div>
-                ))}
+                </section>
+
+                {/* Duplicate Groups */}
+                <section className="flex flex-col gap-4 overflow-hidden">
+                    <h3 className="text-sm font-black text-outline uppercase tracking-widest flex items-center gap-2">
+                        <Copy className="w-4 h-4 text-secondary" /> Duplicate Groups
+                    </h3>
+                    <div className="flex-1 overflow-auto space-y-4 custom-scrollbar pr-2">
+                        {duplicateGroups.map((g, i) => (
+                            <div key={i} className="bg-surface-container-lowest border border-outline-variant/10 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all">
+                                <div className="bg-surface-container-low px-4 py-3 flex justify-between items-center border-b border-outline-variant/5">
+                                    <div className="flex items-center gap-3">
+                                        <h4 className="text-xs font-black text-on-surface truncate max-w-[200px]">{g.name}</h4>
+                                        <span className="text-[10px] font-mono bg-outline-variant/20 px-1.5 py-0.5 rounded text-outline">{g.hash.substring(0,6)}</span>
+                                    </div>
+                                    <span className="text-[10px] font-black text-secondary bg-secondary/10 px-2 py-0.5 rounded-full">{g.paths.length} COPIES</span>
+                                </div>
+                                <div className="divide-y divide-outline-variant/5">
+                                    {g.paths.map((p, j) => (
+                                        <div key={j} className="px-4 py-2.5 flex justify-between items-center group/item hover:bg-primary/5 transition-colors">
+                                            <p className="text-[10px] text-on-surface-variant font-mono truncate flex-1">{p}</p>
+                                            <button className="p-1.5 text-outline-variant hover:text-error transition-colors opacity-0 group-hover/item:opacity-100">
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </section>
             </div>
         </div>
     );

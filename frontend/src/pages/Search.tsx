@@ -1,58 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useEngine } from '../contexts/EngineContext';
-import { Search as SearchIcon, FileDigit, Cpu, Timer, ShieldAlert } from 'lucide-react';
+import { Search as SearchIcon, FileText, ImageIcon, FileCode, Film, File, Filter, X } from 'lucide-react';
 
 interface SearchResult {
     name: string;
     path: string;
     sizeKB: string;
-    reason?: string;
-    dsName?: string;
+    modified?: string;
+    type: string;
 }
+
+const EXTENSION_MAP: Record<string, string> = {
+    'jpg': 'Images', 'jpeg': 'Images', 'png': 'Images', 'gif': 'Images', 'svg': 'Images',
+    'pdf': 'Documents', 'doc': 'Documents', 'docx': 'Documents', 'txt': 'Documents', 'md': 'Documents',
+    'mp4': 'Videos', 'mkv': 'Videos', 'avi': 'Videos', 'mov': 'Videos',
+    'cpp': 'Code', 'h': 'Code', 'py': 'Code', 'js': 'Code', 'ts': 'Code', 'tsx': 'Code', 'html': 'Code', 'css': 'Code'
+};
 
 const Search = () => {
     const { sendCommand, subscribe } = useEngine();
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<SearchResult[]>([]);
-    const [lastQueryData, setLastQueryData] = useState<{type: string, ds: string, queryStr: string} | null>(null);
+    const [activeFilter, setActiveFilter] = useState('All');
+    const [searching, setSearching] = useState(false);
 
     useEffect(() => {
-        const unsub = subscribe('search', (line, type) => {
+        const unsub = subscribe('search', (line) => {
             if (line.startsWith('RESULT|FOUND')) {
                 const parts = line.split('|');
+                const name = parts[2] || '';
+                const ext = name.split('.').pop()?.toLowerCase() || '';
                 setResults(prev => [...prev, {
-                    name: parts[2] || 'Unknown',
-                    path: parts[3] || 'Unknown',
+                    name,
+                    path: parts[3] || '',
                     sizeKB: parts[4] || '0',
-                    dsName: parts[5] || 'B+ Tree'
+                    type: EXTENSION_MAP[ext] || 'Other'
                 }]);
+                setSearching(false);
             } else if (line.startsWith('RESULT|PREFIX')) {
                 const parts = line.split('|');
                 const namesString = parts[2] || '';
-                const dsName = parts[5] || 'Trie Node';
-                
                 if (namesString) {
                     const namesList = namesString.split(',').filter(n => n.trim().length > 0);
-                    const parsedResults = namesList.map(n => ({
-                        name: n,
-                        path: 'Multiple possible paths via Trie',
-                        sizeKB: '--',
-                        dsName: dsName
-                    }));
+                    const parsedResults = namesList.map(n => {
+                        const ext = n.split('.').pop()?.toLowerCase() || '';
+                        return {
+                            name: n,
+                            path: 'Multiple paths indexed',
+                            sizeKB: '--',
+                            type: EXTENSION_MAP[ext] || 'Other'
+                        };
+                    });
                     setResults(prev => [...prev, ...parsedResults]);
                 }
+                setSearching(false);
             } else if (line.startsWith('RESULT|NOT_FOUND')) {
-                const parts = line.split('|');
-                setResults([{
-                    name: parts[2] || 'Missing File',
-                    path: '',
-                    sizeKB: '0',
-                    reason: parts[8] || 'File not present in active tree.',
-                    dsName: parts[5] || 'B+ Tree'
-                }]);
+                setSearching(false);
             }
         });
-
         return () => unsub();
     }, [subscribe]);
 
@@ -60,72 +65,94 @@ const Search = () => {
         e.preventDefault();
         const q = query.trim();
         if (!q) return;
-
         setResults([]);
-        
-        if (q.endsWith('*')) {
-            setLastQueryData({ type: 'Prefix Match via Trie', ds: 'Trie Node O(L)', queryStr: q });
-            sendCommand(`PREFIX ${q.slice(0, -1)}`, 'search');
-        } else {
-            setLastQueryData({ type: 'Exact Match via B+ Tree', ds: 'B+ Tree O(log N)', queryStr: q });
-            sendCommand(`SEARCH ${q}`, 'search');
+        setSearching(true);
+        if (q.endsWith('*')) sendCommand(`PREFIX ${q.slice(0, -1)}`, 'search');
+        else sendCommand(`SEARCH ${q}`, 'search');
+    };
+
+    const filteredResults = useMemo(() => {
+        if (activeFilter === 'All') return results;
+        return results.filter(r => r.type === activeFilter);
+    }, [results, activeFilter]);
+
+    const getIcon = (type: string) => {
+        switch(type) {
+            case 'Images': return <ImageIcon className="w-5 h-5 text-blue-500" />;
+            case 'Videos': return <Film className="w-5 h-5 text-purple-500" />;
+            case 'Code': return <FileCode className="w-5 h-5 text-orange-500" />;
+            case 'Documents': return <FileText className="w-5 h-5 text-green-500" />;
+            default: return <File className="w-5 h-5 text-slate-400" />;
         }
     };
 
     return (
         <div className="flex flex-col h-full gap-6">
             <header>
-                <h1 className="font-h1 text-on-surface">File Search</h1>
-                <p className="text-on-surface-variant font-body-md mt-1">
-                    Locate items instantly using algorithmic indexing. Append an asterisk (*) for prefix searches.
-                </p>
+                <h1 className="font-h1 text-on-surface text-2xl font-bold">File Search</h1>
+                <p className="text-on-surface-variant text-sm mt-1">Locate any file instantly. Use * for partial matches (e.g. "report*").</p>
             </header>
 
-            <form onSubmit={executeSearch} className="flex relative items-center max-w-2xl bg-surface-container-lowest border border-outline-variant/30 rounded-xl overflow-hidden shadow-sm focus-within:ring-2 focus-within:ring-primary/20 transition-all">
-                <SearchIcon className="absolute left-4 w-5 h-5 text-outline" />
-                <input 
-                    type="text" 
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search by exact file name or prefix*..."
-                    className="flex-1 w-full py-4 pl-12 pr-4 bg-transparent outline-none font-sans text-on-surface"
-                />
-                <button type="submit" className="bg-primary text-on-primary px-6 py-4 font-label-md tracking-wider hover:bg-primary-container hover:text-on-primary-container transition-colors">
-                    EXECUTE
-                </button>
-            </form>
+            <div className="flex flex-col gap-4 max-w-4xl">
+                <form onSubmit={executeSearch} className="flex gap-3">
+                    <div className="flex-1 relative group">
+                        <SearchIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-outline transition-colors group-focus-within:text-primary" />
+                        <input 
+                            type="text" 
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Enter filename..."
+                            className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-2xl py-4 pl-12 pr-4 outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all shadow-sm"
+                        />
+                        {query && (
+                            <button onClick={() => setQuery('')} className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-container rounded-full">
+                                <X className="w-4 h-4 text-outline" />
+                            </button>
+                        )}
+                    </div>
+                    <button type="submit" className="bg-primary text-on-primary px-8 rounded-2xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-lg">
+                        SEARCH
+                    </button>
+                </form>
 
-            {lastQueryData && (
-                <div className="flex items-center gap-4 text-xs font-mono">
-                    <span className="px-2 py-1 bg-surface-container rounded-md flex items-center gap-2 text-on-surface-variant">
-                        <Cpu className="w-4 h-4 text-primary" /> {lastQueryData.ds}
-                    </span>
-                    <span className="px-2 py-1 bg-surface-container rounded-md flex items-center gap-2 text-on-surface-variant">
-                        <Timer className="w-4 h-4 text-secondary" /> {lastQueryData.type}
-                    </span>
+                <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
+                    <Filter className="w-4 h-4 text-outline-variant mr-2" />
+                    {['All', 'Images', 'Documents', 'Videos', 'Code', 'Other'].map(f => (
+                        <button 
+                            key={f}
+                            onClick={() => setActiveFilter(f)}
+                            className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap border ${activeFilter === f ? 'bg-primary text-on-primary border-primary shadow-md' : 'bg-surface-container-low text-on-surface-variant border-outline-variant/20 hover:border-outline-variant'}`}
+                        >
+                            {f}
+                        </button>
+                    ))}
                 </div>
-            )}
+            </div>
 
-            <div className="flex-1 overflow-auto -mx-2 px-2 custom-scrollbar space-y-3">
-                {results.length === 0 && lastQueryData && (
-                    <div className="text-sm font-mono text-outline-variant text-center my-12">Waiting for engine response...</div>
-                )}
+            <div className="flex-1 overflow-auto -mx-2 px-2 space-y-3 custom-scrollbar">
+                {searching && <div className="text-center py-12 text-outline-variant font-medium animate-pulse">Searching library...</div>}
+                {!searching && results.length === 0 && query && <div className="text-center py-12 text-outline-variant">No files found matching your search.</div>}
                 
-                {results.map((r, i) => (
-                    <div key={i} className={`bg-surface-container-lowest border ${r.reason ? 'border-error/20' : 'border-outline-variant/20 hover:border-primary/30'} p-4 rounded-xl flex justify-between items-center transition-all bg-white shadow-sm`}>
-                        <div className="flex items-center gap-4">
-                            <div className={`p-3 rounded-md ${r.reason ? 'bg-error-container text-on-error-container' : 'bg-surface-container text-primary'}`}>
-                                {r.reason ? <ShieldAlert className="w-6 h-6" /> : <FileDigit className="w-6 h-6" />}
+                {filteredResults.map((r, i) => (
+                    <div key={i} className="bg-surface-container-lowest border border-outline-variant/10 p-5 rounded-2xl flex justify-between items-center hover:border-primary/20 hover:shadow-md transition-all group">
+                        <div className="flex items-center gap-5 overflow-hidden">
+                            <div className="p-3 bg-surface-container-high rounded-xl group-hover:scale-110 transition-transform shadow-sm">
+                                {getIcon(r.type)}
                             </div>
-                            <div>
-                                <h4 className="font-h3 text-on-surface">{r.name}</h4>
-                                {r.path && <p className="text-xs text-on-surface-variant font-mono mt-1 w-96 truncate" title={r.path}>{r.path}</p>}
-                                {r.reason && <p className="text-xs text-error mt-1">{r.reason}</p>}
+                            <div className="overflow-hidden">
+                                <h4 className="font-bold text-on-surface truncate">{r.name}</h4>
+                                <p className="text-xs text-on-surface-variant font-mono mt-1 truncate max-w-lg opacity-70 group-hover:opacity-100 transition-opacity">{r.path}</p>
                             </div>
                         </div>
-                        <div className="text-right">
-                            <div className="text-xs font-mono text-outline uppercase tracking-tight mb-1">SIZE</div>
-                            <div className="font-bold text-on-surface">{r.sizeKB} KB</div>
+                        <div className="flex items-center gap-8 text-right flex-shrink-0">
+                            <div className="hidden md:block">
+                                <p className="text-[10px] font-bold text-outline uppercase tracking-wider mb-0.5">TYPE</p>
+                                <p className="text-xs font-bold text-on-surface-variant">{r.type}</p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] font-bold text-outline uppercase tracking-wider mb-0.5">SIZE</p>
+                                <p className="text-sm font-black text-on-surface">{r.sizeKB} {r.sizeKB !== '--' && 'KB'}</p>
+                            </div>
                         </div>
                     </div>
                 ))}
