@@ -20,6 +20,7 @@ extern UnionFind uf;
 extern vector<int> allFileIds;
 
 void generateData(int n) {
+    allFileIds.clear();
     // Setup folder nodes in UnionFind
     uf.addNode(0);                // root
     uf.addNode(1); uf.unite(1, 0); // /documents

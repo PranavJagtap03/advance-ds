@@ -32,3 +32,11 @@ Thumbs.db
 # Local environment/database
 *.db
 *.sqlite
+
+# Generated context files
+full_code.txt
+full_codebase.txt
+project_codebase.txt
+
+# Experimental/Temp folders
+stitch_*/

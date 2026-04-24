@@ -328,17 +328,27 @@ void showSystemInfo() {
 // MACHINE MODE — LOAD_DIR implementation
 // ═══════════════════════════════════════════════════════════════════
 
-// Returns {count_loaded, total_bytes}
+// Join a vector of strings with a delimiter
+static string joinStrings(const vector<string>& v, char delim = ',') {
+    string s;
+    for (int i = 0; i < (int)v.size(); i++) {
+        if (i > 0) s += delim;
+        s += v[i];
+    }
+    return s;
+}
+
+// Sanitise a pipe-unsafe string (replace | with _)
+static string safe(const string& s) {
+    string r = s;
+    for (char& c : r) if (c == '|') c = '_';
+    return r;
+}
+
+    // Returns {count_loaded, total_bytes}
 pair<int,long> loadDirectory(const string& dirPath) {
     int count = 0;
     long totalBytes = 0;
-
-    // Folder nodes in UnionFind
-    uf.addNode(0);
-    uf.addNode(1); uf.unite(1, 0);
-    uf.addNode(2); uf.unite(2, 0);
-    uf.addNode(3); uf.unite(3, 0);
-    uf.addNode(4); uf.unite(4, 0);
 
 #ifdef _WIN32
     // Windows: use FindFirstFile / FindNextFile
@@ -350,6 +360,9 @@ pair<int,long> loadDirectory(const string& dirPath) {
     do {
         string fname = ffd.cFileName;
         if (fname == "." || fname == "..") continue;
+        
+        // Skip hidden, system, and junction points (symlinks) to prevent infinite loops on C:\
+        if (ffd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | 0x400)) continue;
 
         string fullPath = dirPath + "\\" + fname;
 
@@ -384,6 +397,12 @@ pair<int,long> loadDirectory(const string& dirPath) {
 
             count++;
             totalBytes += fileSize;
+            
+            static int lastCount = 0;
+            if (count > 0 && (count % 100 == 0 || count - lastCount >= 50)) {
+                lastCount = count;
+                cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
+            }
         }
     } while (FindNextFileA(hFind, &ffd) != 0);
 
@@ -429,6 +448,12 @@ pair<int,long> loadDirectory(const string& dirPath) {
 
             count++;
             totalBytes += fileSize;
+            
+            static int lastCountPosix = 0;
+            if (count > 0 && (count % 100 == 0 || count - lastCountPosix >= 50)) {
+                lastCountPosix = count;
+                cout << "INDEXING|" << count << "|" << safe(fullPath) << endl << flush;
+            }
         }
     }
     closedir(dir);
@@ -448,23 +473,6 @@ static const string MONTH_NAMES[12] = {
 };
 static const int MONTH_START_DAYS[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
 static const int MONTH_END_DAYS[12]   = {30,58,89,119,150,180,211,242,272,303,333,364};
-
-// Join a vector of strings with a delimiter
-static string joinStrings(const vector<string>& v, char delim = ',') {
-    string s;
-    for (int i = 0; i < (int)v.size(); i++) {
-        if (i > 0) s += delim;
-        s += v[i];
-    }
-    return s;
-}
-
-// Sanitise a pipe-unsafe string (replace | with _)
-static string safe(const string& s) {
-    string r = s;
-    for (char& c : r) if (c == '|') c = '_';
-    return r;
-}
 
 void runMachineMode() {
     string line;
@@ -530,7 +538,7 @@ void runMachineMode() {
                 struct tm* t = localtime(&fmod);
                 if (t) {
                     int day = t->tm_yday + 1;
-                    segTree.addFile(day, fsize / 1024);
+                    segTree.addFile(day, fsize);
                 }
             }
             allFileIds.push_back(node.id);
@@ -566,7 +574,7 @@ void runMachineMode() {
                     struct tm* t = localtime(&fmod);
                     if (t) {
                         int day = t->tm_yday + 1;
-                        segTree.addFile(day, fsize / 1024);
+                        segTree.addFile(day, fsize);
                     }
                 }
                 allFileIds.push_back(node.id);
@@ -632,7 +640,10 @@ void runMachineMode() {
             } else {
                 cout << "RESULT|NOT_FOUND"
                      << "|" << safe(filename)
+                     << "|"
+                     << "|"
                      << "|" << qr.dsName
+                     << "|"
                      << "|" << hops
                      << "|" << safe(qr.reason)
                      << endl << flush;
@@ -799,10 +810,13 @@ void runMachineMode() {
             for (int v = 1; ; v++) {
                 FileNode fn = pds.getVersion(fid, v);
                 if (fn.id == -1) break;
-                cout << "VERSION"
+                cout << "RESULT|VERSION"
                      << "|" << fid
                      << "|" << v
-                     << "|" << fn.size / 1024
+                     << "|" << safe(fn.name)
+                     << "|" << safe(fn.path)
+                     << "|" << fn.parentId
+                     << "|" << fn.size
                      << "|" << fn.modifiedAt
                      << endl << flush;
                 count++;
@@ -893,6 +907,13 @@ void runMachineMode() {
 // MAIN FUNCTION
 // ═══════════════════════════════════
 int main(int argc, char* argv[]) {
+    // Folder nodes in UnionFind setup
+    uf.addNode(0);
+    uf.addNode(1); uf.unite(1, 0);
+    uf.addNode(2); uf.unite(2, 0);
+    uf.addNode(3); uf.unite(3, 0);
+    uf.addNode(4); uf.unite(4, 0);
+
     // Check for --machine flag
     bool machineMode = false;
     for (int i = 1; i < argc; i++) {

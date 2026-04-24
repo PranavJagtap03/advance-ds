@@ -99,9 +99,14 @@ inline void storageAnalytics() {
 inline void benchmark() {
     using namespace std::chrono;
     
-    cout << "Generating 10000 files for benchmark..." << endl;
-    generateData(10000);
     vector<FileNode> all = bpt.getAllLeaves();
+    if (all.empty()) {
+        cout << "Tree empty! Generating 10000 files for benchmark..." << endl;
+        generateData(10000);
+        all = bpt.getAllLeaves();
+    } else {
+        cout << "Running benchmark on " << all.size() << " files..." << endl;
+    }
 
     if (all.empty()) return;
 
@@ -190,7 +195,7 @@ inline void stressTest() {
 
     // Test 1 — BPlusTree
     int bptErrors = 0;
-    string names[50000];
+    vector<string> names(50000);
     for (int i = 0; i < 50000; i++) {
         FileNode f;
         f.name = "stress_" + to_string(i);

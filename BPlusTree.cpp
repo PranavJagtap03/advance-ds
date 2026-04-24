@@ -41,10 +41,7 @@ FileNode* BPlusTree::searchNode(BPlusNode* node, string key) {
         }
         return nullptr;
     } else {
-        // If internal: find correct child index, and if it matches, traverse right
-        if (i < node->keys.size() && node->keys[i] == key) {
-            i++; 
-        }
+        // If internal: just traverse right, no equality check
         return searchNode(node->children[i], key);
     }
 }
@@ -93,10 +90,10 @@ void BPlusTree::insertNonFull(BPlusNode* node, string key, FileNode val) {
 
 // 7. splitChild(parent, i, child)
 void BPlusTree::splitChild(BPlusNode* parent, int i, BPlusNode* child) {
-    int t = ORDER / 2; // Midpoint to split
     BPlusNode* newNode = new BPlusNode(child->isLeaf); // same type as child
     
     if (child->isLeaf) {
+        int t = child->keys.size() / 2;
         // Move right half of child's keys and values to new node
         newNode->keys.assign(child->keys.begin() + t, child->keys.end());
         newNode->values.assign(child->values.begin() + t, child->values.end());
@@ -112,14 +109,15 @@ void BPlusTree::splitChild(BPlusNode* parent, int i, BPlusNode* child) {
         parent->children.insert(parent->children.begin() + i + 1, newNode);
         parent->keys.insert(parent->keys.begin() + i, newNode->keys[0]); // keep middle key in both
     } else {
+        int t = child->keys.size() / 2;
         // Internal node: Move right half of child's keys and children to new node
-        newNode->keys.assign(child->keys.begin() + t, child->keys.end());
-        newNode->children.assign(child->children.begin() + t, child->children.end());
+        newNode->keys.assign(child->keys.begin() + t + 1, child->keys.end());
+        newNode->children.assign(child->children.begin() + t + 1, child->children.end());
         
-        string promotedKey = child->keys[t - 1]; 
+        string promotedKey = child->keys[t]; 
         
-        child->keys.erase(child->keys.begin() + t - 1, child->keys.end());
-        child->children.erase(child->children.begin() + t, child->children.end());
+        child->keys.erase(child->keys.begin() + t, child->keys.end());
+        child->children.erase(child->children.begin() + t + 1, child->children.end());
         
         // Insert new node into parent's children, promote middle key
         parent->children.insert(parent->children.begin() + i + 1, newNode);
@@ -225,11 +223,15 @@ void BPlusTree::remove(string key) {
     if (!root) return;
     
     BPlusNode* curr = root;
+    BPlusNode* parent = nullptr;
+    int childIndex = -1;
     
     // Find leaf containing key
     while (!curr->isLeaf) {
         int i = 0;
         while (i < curr->keys.size() && key > curr->keys[i]) i++;
+        parent = curr;
+        childIndex = i;
         curr = curr->children[i];
     }
     
@@ -251,9 +253,42 @@ void BPlusTree::remove(string key) {
     }
     
     // Check if leaf has too few keys: borrow from sibling or merge
-    // Note: complex structure deletion steps typically omitted without direct tree reference
-    if (curr != root && curr->keys.size() < (ORDER - 1) / 2) {
-        // Merge or re-distribute operations would occur here typically.
+    int minKeys = (ORDER - 1) / 2;
+    if (curr != root && curr->keys.size() < minKeys) {
+        BPlusNode* leftSib = (childIndex > 0) ? parent->children[childIndex - 1] : nullptr;
+        BPlusNode* rightSib = (childIndex < parent->children.size() - 1) ? parent->children[childIndex + 1] : nullptr;
+        
+        if (leftSib && leftSib->keys.size() > minKeys) {
+            // Borrow from left sibling
+            curr->keys.insert(curr->keys.begin(), leftSib->keys.back());
+            curr->values.insert(curr->values.begin(), leftSib->values.back());
+            leftSib->keys.pop_back();
+            leftSib->values.pop_back();
+            parent->keys[childIndex - 1] = curr->keys[0];
+        } else if (rightSib && rightSib->keys.size() > minKeys) {
+            // Borrow from right sibling
+            curr->keys.push_back(rightSib->keys.front());
+            curr->values.push_back(rightSib->values.front());
+            rightSib->keys.erase(rightSib->keys.begin());
+            rightSib->values.erase(rightSib->values.begin());
+            parent->keys[childIndex] = rightSib->keys[0];
+        } else if (leftSib) {
+            // Merge with left sibling
+            leftSib->keys.insert(leftSib->keys.end(), curr->keys.begin(), curr->keys.end());
+            leftSib->values.insert(leftSib->values.end(), curr->values.begin(), curr->values.end());
+            leftSib->next = curr->next;
+            parent->keys.erase(parent->keys.begin() + childIndex - 1);
+            parent->children.erase(parent->children.begin() + childIndex);
+            delete curr;
+        } else if (rightSib) {
+            // Merge with right sibling
+            curr->keys.insert(curr->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
+            curr->values.insert(curr->values.end(), rightSib->values.begin(), rightSib->values.end());
+            curr->next = rightSib->next;
+            parent->keys.erase(parent->keys.begin() + childIndex);
+            parent->children.erase(parent->children.begin() + childIndex + 1);
+            delete rightSib;
+        }
     }
 }
 
@@ -333,9 +368,6 @@ FileNode* BPlusTree::searchNodeWithPath(BPlusNode* node, string key,
         }
         return nullptr;
     } else {
-        if (i < (int)node->keys.size() && node->keys[i] == key) {
-            i++;
-        }
         hops++;
         return searchNodeWithPath(node->children[i], key, path, hops, nodeCounter);
     }

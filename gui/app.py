@@ -52,6 +52,51 @@ MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun",
                "Jul","Aug","Sep","Oct","Nov","Dec"]
 
 
+def format_bytes(size_bytes: int) -> str:
+    """Format byte counts for compact UI display."""
+    size = max(int(size_bytes or 0), 0)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    unit = units[0]
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            break
+        value /= 1024.0
+    if unit in ("B", "KB"):
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"
+
+
+def format_timestamp(ts: int) -> str:
+    """Return a friendly modified date for explorer rows."""
+    if not ts:
+        return "Unknown"
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(int(ts)))
+    except Exception:
+        return "Unknown"
+
+
+def bind_hover(widget, base_bg, hover_bg, base_fg=TEXT, hover_fg=None):
+    """Add lightweight hover feedback to buttons."""
+    hover_fg = hover_fg if hover_fg is not None else base_fg
+
+    def _enter(_event):
+        try:
+            widget.configure(bg=hover_bg, fg=hover_fg)
+        except tk.TclError:
+            pass
+
+    def _leave(_event):
+        try:
+            widget.configure(bg=base_bg, fg=base_fg)
+        except tk.TclError:
+            pass
+
+    widget.bind("<Enter>", _enter)
+    widget.bind("<Leave>", _leave)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. SubprocessBridge
 # ═══════════════════════════════════════════════════════════════════
@@ -165,6 +210,17 @@ class AnimationCanvas:
                                   font=("Consolas", 12, "bold"))
         self.ds_label.pack(side="left", padx=14, pady=8)
 
+        self.mode_label = tk.Label(
+            hdr,
+            text="Conceptual DS view",
+            bg="#1f2530",
+            fg=WARNING,
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=3,
+        )
+        self.mode_label.pack(side="right", padx=12, pady=7)
+
         # Canvas
         self.canvas = tk.Canvas(self.parent, bg=BG,
                                 highlightthickness=1,
@@ -172,7 +228,9 @@ class AnimationCanvas:
         self.canvas.pack(fill="both", expand=True, padx=6, pady=4)
 
         # Status bar
-        self.status_var = tk.StringVar(value="Ready — send a query to animate")
+        self.status_var = tk.StringVar(
+            value="Ready — visualizations illustrate DS flow and query routing"
+        )
         sb = tk.Label(self.parent, textvariable=self.status_var,
                       bg=PANEL2, fg=TEXT_DIM,
                       font=("Consolas", 9), anchor="w", padx=10)
@@ -614,6 +672,10 @@ class FileExplorer:
         self.on_scan = on_scan_cb
         self.on_generate = on_generate_cb
         self.on_index_system = on_index_system_cb
+        self._all_records = []
+        self._indexed_folders = []
+        self._folder_nodes = {}
+        self._item_lookup = {}
         self._build()
 
     def _build(self):
@@ -621,22 +683,22 @@ class FileExplorer:
         hdr = tk.Frame(self.parent, bg=PANEL, height=40)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        tk.Label(hdr, text="📂 File Explorer", bg=PANEL, fg=TEXT,
+        tk.Label(hdr, text="File Explorer", bg=PANEL, fg=TEXT,
                  font=("Segoe UI", 11, "bold")).pack(side="left", padx=10, pady=8)
 
         # Buttons
         btn_frame = tk.Frame(self.parent, bg=PANEL, pady=6)
         btn_frame.pack(fill="x", padx=8)
 
-        self._btn(btn_frame, "🔍 Scan Folder", self.on_scan)\
+        self._btn(btn_frame, "Scan Folder", self.on_scan)\
             .pack(fill="x", pady=2)
-        self._btn(btn_frame, "⚡ Generate 1000", self.on_generate)\
+        self._btn(btn_frame, "Generate 1000", self.on_generate)\
             .pack(fill="x", pady=2)
 
         # Index My System button (prominent, different color)
         idx_btn = tk.Button(
             btn_frame,
-            text="🖥️ Index My System",
+            text="Index My System",
             command=self.on_index_system if self.on_index_system else lambda: None,
             bg="#1f2d1f", fg=SUCCESS,
             activebackground="#2a4a2a", activeforeground=SUCCESS,
@@ -645,10 +707,13 @@ class FileExplorer:
             highlightthickness=1, highlightbackground="#238636",
         )
         idx_btn.pack(fill="x", pady=2)
+        bind_hover(idx_btn, "#1f2d1f", "#244124", SUCCESS, SUCCESS)
 
         # Search filter
         sf = tk.Frame(self.parent, bg=PANEL, pady=4)
         sf.pack(fill="x", padx=8)
+        tk.Label(sf, text="Filter indexed files", bg=PANEL, fg=TEXT_DIM,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 2))
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", self._on_filter)
         fe = tk.Entry(sf, textvariable=self.filter_var,
@@ -657,9 +722,6 @@ class FileExplorer:
                       highlightthickness=1, highlightbackground=BORDER,
                       highlightcolor=ACCENT)
         fe.pack(fill="x", ipady=4)
-        fe.insert(0, "🔎 Filter files…")
-        fe.bind("<FocusIn>",  lambda e: fe.delete(0,"end") if fe.get().startswith("🔎") else None)
-        fe.bind("<FocusOut>", lambda e: fe.insert(0,"🔎 Filter files…") if not fe.get() else None)
 
         # Treeview
         tree_frame = tk.Frame(self.parent, bg=PANEL)
@@ -702,92 +764,135 @@ class FileExplorer:
         tk.Label(self.parent, textvariable=self.count_var,
                  bg=PANEL, fg=TEXT_DIM, font=("Consolas",8)).pack(pady=4)
 
-        # Pre-populate with demo structure
-        self._init_demo_tree()
+        self._show_empty_tree()
 
     # ── tree operations ───────────────────────────────────────────
-    def _init_demo_tree(self):
+    def _show_empty_tree(self):
         self.tree.delete(*self.tree.get_children())
-        folders = {
-            "/documents":  "📁",
-            "/downloads":  "📁",
-            "/photos":     "📁",
-            "/backup":     "📁",
-        }
         self._folder_nodes = {}
-        for folder, icon in folders.items():
-            fid = self.tree.insert("", "end",
-                text=icon+" "+folder, open=False,
-                values=("—", "—"))
-            self._folder_nodes[folder] = fid
+        self._item_lookup = {}
+        self.tree.insert(
+            "",
+            "end",
+            text="No indexed files yet",
+            values=("Scan a folder or replay cache", ""),
+        )
 
-    def add_file(self, name: str, path: str, size_kb: int):
-        # Determine parent folder from path
-        parent_folder = "/documents"
-        for folder in self._folder_nodes:
-            if folder in path:
-                parent_folder = folder
-                break
-        parent_node = self._folder_nodes.get(parent_folder, "")
+    def _folder_for_path(self, path: str) -> str:
+        norm = os.path.normcase(path)
+        for folder in self._indexed_folders:
+            if norm.startswith(os.path.normcase(folder)):
+                return folder
+        return os.path.dirname(path) or path
 
-        # File icon by extension
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        icon_map = {"pdf":"📄","xlsx":"📊","docx":"📝","txt":"📄",
-                    "jpg":"🖼️","png":"🖼️","mp4":"🎬","zip":"🗜️"}
-        icon = icon_map.get(ext, "📄")
+    def _folder_label(self, folder_path: str, file_count: int) -> str:
+        clean = folder_path.rstrip("\\/")
+        label = os.path.basename(clean) or clean
+        return f"[DIR] {label}"
 
-        size_str = f"{size_kb} KB" if size_kb < 1024 else f"{size_kb//1024} MB"
-        self.tree.insert(parent_node, "end",
-                         text=icon+" "+name,
-                         values=(size_str, "today"))
+    def _render_tree(self, records):
+        self.tree.delete(*self.tree.get_children())
+        self._folder_nodes = {}
+        self._item_lookup = {}
+
+        if not records:
+            empty = "No files match the current filter" if self._all_records else "No indexed files yet"
+            detail = "Try a broader filter" if self._all_records else "Scan a folder or replay cache"
+            self.tree.insert("", "end", text=empty, values=(detail, ""))
+            total = len(self._all_records)
+            if total:
+                self.count_var.set(f"0 matching files · {total:,} indexed total")
+            else:
+                self.count_var.set("0 files indexed")
+            return
+
+        grouped = {}
+        for record in records[:500]:
+            name, path, size_bytes, modified = record
+            folder = self._folder_for_path(path)
+            grouped.setdefault(folder, []).append((name, path, size_bytes, modified))
+
+        for folder_path, items in sorted(grouped.items(), key=lambda kv: kv[0].lower()):
+            folder_node = self.tree.insert(
+                "",
+                "end",
+                text=self._folder_label(folder_path, len(items)),
+                open=True,
+                values=(f"{len(items)} files", ""),
+            )
+            self._folder_nodes[folder_path] = folder_node
+            for name, path, size_bytes, modified in sorted(items, key=lambda item: item[0].lower()):
+                item_id = self.tree.insert(
+                    folder_node,
+                    "end",
+                    text=name,
+                    values=(format_bytes(size_bytes), format_timestamp(modified)),
+                )
+                self._item_lookup[item_id] = (name, path, size_bytes, modified)
+
+        shown = min(len(records), 500)
+        total = len(self._all_records)
+        if len(records) != total:
+            self.count_var.set(f"{len(records):,} matching files · {total:,} indexed total")
+        elif total > shown:
+            self.count_var.set(f"Showing {shown:,} of {total:,} indexed files")
+        else:
+            self.count_var.set(f"{total:,} files indexed")
+
+    def load_records(self, file_list, indexed_folders=None):
+        """Rebuild the explorer from real cached/indexed files."""
+        normalized = []
+        for record in file_list:
+            if len(record) < 4:
+                continue
+            name, path, size_bytes, modified = record[:4]
+            normalized.append((name, path, int(size_bytes or 0), int(modified or 0)))
+        self._all_records = normalized
+        self._indexed_folders = sorted(indexed_folders or [], key=len, reverse=True)
+        self._render_tree(self._filtered_records())
 
     def set_file_count(self, count: int):
         self.count_var.set(f"{count:,} files indexed")
 
     def clear_and_reload(self, file_list):
-        """Rebuild tree from a list of (name, path, size_kb)."""
-        self._init_demo_tree()
-        for name, path, size_kb in file_list[:500]:  # cap display
-            self.add_file(name, path, size_kb)
-        self.set_file_count(len(file_list))
+        """Backward-compatible helper for simple record lists."""
+        normalized = []
+        for record in file_list:
+            if len(record) >= 3:
+                name, path, size_kb = record[:3]
+                normalized.append((name, path, int(size_kb or 0) * 1024, 0))
+        self.load_records(normalized)
 
     # ── callbacks ─────────────────────────────────────────────────
     def _on_select(self, event):
         sel = self.tree.selection()
         if not sel: return
-        item = self.tree.item(sel[0])
-        name = item["text"].split(" ", 1)[-1].strip()
-        if not name.startswith("/") and "." in name:
-            self.on_file_select(name)
+        record = self._item_lookup.get(sel[0])
+        if record:
+            self.on_file_select(record[0])
+
+    def _filtered_records(self):
+        query = self.filter_var.get().strip().lower()
+        if not query:
+            return list(self._all_records)
+        return [
+            record for record in self._all_records
+            if query in record[0].lower() or query in record[1].lower()
+        ]
 
     def _on_filter(self, *_):
-        q = self.filter_var.get().lstrip("🔎 ").lower()
-        # Simple show/hide by tag — rebuild visible set
-        for item in self.tree.get_children():
-            for child in self.tree.get_children(item):
-                label = self.tree.item(child)["text"].lower()
-                if q and q not in label:
-                    self.tree.detach(child)
-                else:
-                    parent = self._find_parent_of(child)
-                    if parent:
-                        if child not in self.tree.get_children(parent):
-                            self.tree.move(child, parent, "end")
-
-    def _find_parent_of(self, iid):
-        for folder_node in self._folder_nodes.values():
-            if iid in self.tree.get_children(folder_node):
-                return folder_node
-        return None
+        self._render_tree(self._filtered_records())
 
     def _btn(self, parent, text, cmd):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=PANEL2, fg=TEXT, activebackground=ACCENT2,
-                         activeforeground=BG, relief="flat",
-                         font=("Segoe UI", 9), pady=6,
-                         cursor="hand2", bd=0,
-                         highlightthickness=1,
-                         highlightbackground=BORDER)
+        button = tk.Button(parent, text=text, command=cmd,
+                           bg=PANEL2, fg=TEXT, activebackground=ACCENT2,
+                           activeforeground=BG, relief="flat",
+                           font=("Segoe UI", 9), pady=6,
+                           cursor="hand2", bd=0,
+                           highlightthickness=1,
+                           highlightbackground=BORDER)
+        bind_hover(button, PANEL2, "#2b3138", TEXT, TEXT)
+        return button
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -815,7 +920,7 @@ class QueryPanel:
         q_frame = tk.Frame(self.parent, bg=PANEL, pady=8)
         q_frame.pack(fill="x", padx=10)
 
-        tk.Label(q_frame, text="🔍 Query", bg=PANEL, fg=TEXT,
+        tk.Label(q_frame, text="Query", bg=PANEL, fg=TEXT,
                  font=("Segoe UI",11,"bold")).pack(anchor="w")
 
         # Entry
@@ -840,11 +945,13 @@ class QueryPanel:
             ("Date Range", lambda: self._set_filter("date:jan-mar")),
         ]
         for label, cmd in filter_btns:
-            tk.Button(filters, text=label, command=cmd,
-                      bg=PANEL2, fg=TEXT_DIM, relief="flat",
-                      font=("Segoe UI",8), padx=6, pady=4,
-                      activebackground=ACCENT2, activeforeground=BG,
-                      cursor="hand2").pack(side="left", padx=2)
+            btn = tk.Button(filters, text=label, command=cmd,
+                            bg=PANEL2, fg=TEXT_DIM, relief="flat",
+                            font=("Segoe UI",8), padx=6, pady=4,
+                            activebackground=ACCENT2, activeforeground=BG,
+                            cursor="hand2")
+            btn.pack(side="left", padx=2)
+            bind_hover(btn, PANEL2, "#2b3138", TEXT_DIM, TEXT)
 
         # Search button
         self.search_btn = tk.Button(q_frame, text="▶  SEARCH",
@@ -854,6 +961,7 @@ class QueryPanel:
                                     activebackground=ACCENT,
                                     cursor="hand2")
         self.search_btn.pack(fill="x", pady=4)
+        bind_hover(self.search_btn, ACCENT2, ACCENT, BG, BG)
 
         # ── DS badge ─────────────────────────────────────────────
         self._separator()
@@ -879,7 +987,7 @@ class QueryPanel:
 
         # ── Results ───────────────────────────────────────────────
         self._separator()
-        tk.Label(self.parent, text="📋 Results",
+        tk.Label(self.parent, text="Results",
                  bg=PANEL, fg=TEXT,
                  font=("Segoe UI",10,"bold")).pack(anchor="w", padx=10)
 
@@ -904,14 +1012,18 @@ class QueryPanel:
                                         font=("Consolas",9,"bold"))
         self.results_text.tag_configure("dim",    foreground=TEXT_DIM)
         self.results_text.tag_configure("warn",   foreground=WARNING)
+        self.results_text.tag_configure("hero",   foreground=TEXT,
+                                        font=("Segoe UI",11,"bold"))
+        self.results_text.tag_configure("soft",   foreground=TEXT_DIM,
+                                        font=("Segoe UI",9))
 
         # ── Analytics bar chart ───────────────────────────────────
         self._separator()
-        tk.Label(self.parent, text="📊 Storage Analytics",
+        tk.Label(self.parent, text="Storage Analytics",
                  bg=PANEL, fg=TEXT,
                  font=("Segoe UI",10,"bold")).pack(anchor="w", padx=10)
 
-        self.chart_canvas = tk.Canvas(self.parent, bg=BG, height=90,
+        self.chart_canvas = tk.Canvas(self.parent, bg=BG, height=190,
                                       highlightthickness=0)
         self.chart_canvas.pack(fill="x", padx=10, pady=4)
         self.chart_canvas.bind("<Configure>", lambda e: self._draw_chart())
@@ -922,10 +1034,10 @@ class QueryPanel:
         btn_frame.pack(fill="x", padx=10)
 
         action_btns = [
-            ("🔁 Duplicates",  self.on_dup),
-            ("👻 Orphans",     self.on_orphan),
-            ("📊 Analytics",   self.on_analytics),
-            ("⚡ Benchmark",   self.on_bench),
+            ("Duplicates",  self.on_dup),
+            ("Orphans",     self.on_orphan),
+            ("Analytics",   self.on_analytics),
+            ("Benchmark",   self.on_bench),
         ]
         for i, (label, cmd) in enumerate(action_btns):
             col = i % 2
@@ -936,8 +1048,10 @@ class QueryPanel:
                           activebackground=ACCENT2, activeforeground=BG,
                           cursor="hand2")
             b.grid(row=row, column=col, padx=3, pady=2, sticky="ew")
+            bind_hover(b, PANEL2, "#2b3138", TEXT, TEXT)
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
+        self.show_welcome_state()
 
     # ── helpers ───────────────────────────────────────────────────
     def _separator(self):
@@ -989,6 +1103,27 @@ class QueryPanel:
     def clear_results(self):
         self.results_text.configure(state="normal")
         self.results_text.delete("1.0","end")
+        self.results_text.configure(state="disabled")
+
+    def show_welcome_state(self):
+        self.results_text.configure(state="normal")
+        self.results_text.delete("1.0", "end")
+        self.results_text.insert("end", "Search the indexed file system\n", "hero")
+        self.results_text.insert(
+            "end",
+            "Use exact filenames, prefixes, or range queries to route work through the right data structure.\n\n",
+            "soft",
+        )
+        self.results_text.insert("end", "Examples\n", "header")
+        self.results_text.insert("end", "  report.pdf\n", "dim")
+        self.results_text.insert("end", "  bud*\n", "dim")
+        self.results_text.insert("end", "  size:100-5000\n", "dim")
+        self.results_text.insert("end", "  date:jan-mar\n\n", "dim")
+        self.results_text.insert(
+            "end",
+            "Explorer entries now reflect cached and indexed files instead of demo folders.\n",
+            "soft",
+        )
         self.results_text.configure(state="disabled")
 
     def _format_result_line(self, line: str):
@@ -1089,24 +1224,40 @@ class QueryPanel:
         c = self.chart_canvas
         c.delete("all")
         w = c.winfo_width() or 480
-        h = c.winfo_height() or 90
+        h = c.winfo_height() or 190
         if not self._month_data:
-            c.create_text(w//2, h//2, text="Run Analytics to populate chart",
-                          fill=TEXT_DIM, font=("Consolas",9))
+            c.create_text(w//2, h//2 - 10, text="Run Analytics to populate chart",
+                          fill=TEXT_DIM, font=("Consolas",10))
+            c.create_text(w//2, h//2 + 16,
+                          text="Monthly storage totals will appear here",
+                          fill="#6e7681", font=("Segoe UI",9))
             return
 
         max_mb = max(self._month_data.values()) or 1
-        bar_w  = max(4, (w - 40) // 12 - 2)
+        left_pad = 36
+        right_pad = 18
+        top_pad = 16
+        bottom_pad = 34
+        chart_height = max(40, h - top_pad - bottom_pad)
+        step = max(18, (w - left_pad - right_pad) // 12)
+        bar_w = max(10, step - 8)
+
+        for ratio in (0.25, 0.5, 0.75, 1.0):
+            y = top_pad + int(chart_height * (1 - ratio))
+            c.create_line(left_pad, y, w - right_pad, y, fill="#20262d", width=1)
+            c.create_text(left_pad - 10, y, text=f"{max_mb * ratio:.0f}",
+                          fill="#6e7681", font=("Consolas",7))
+
         for i, month in enumerate(MONTH_NAMES):
             mb = self._month_data.get(month, 0.0)
-            bar_h = int((mb / max_mb) * (h - 30))
-            x = 20 + i * ((w-40)//12)
-            y_top = h - 20 - bar_h
+            bar_h = int((mb / max_mb) * chart_height)
+            x = left_pad + i * step
+            y_top = top_pad + chart_height - bar_h
             color = ACCENT if month not in ("Jun","Jul","Aug") else WARNING
-            c.create_rectangle(x, y_top, x+bar_w, h-20,
+            c.create_rectangle(x, y_top, x+bar_w, top_pad + chart_height,
                                fill=color, outline="")
-            c.create_text(x+bar_w//2, h-10,
-                          text=month[:1], fill=TEXT_DIM,
+            c.create_text(x+bar_w//2, h-14,
+                          text=month, fill=TEXT_DIM,
                           font=("Consolas",7))
             if mb > 0:
                 c.create_text(x+bar_w//2, y_top-6,
@@ -1254,6 +1405,17 @@ class FileCache:
                 "SELECT name, path, size_bytes, modified FROM files "
                 "WHERE name LIKE ? LIMIT ?",
                 (f"%{query}%", limit)
+            )
+            return c.fetchall()
+
+    def get_recent_records(self, limit: int = 500):
+        """Return recent records for the explorer UI."""
+        with self._lock:
+            c = self._conn.cursor()
+            c.execute(
+                "SELECT name, path, size_bytes, modified FROM files "
+                "ORDER BY indexed_at DESC, modified DESC, name ASC LIMIT ?",
+                (limit,)
             )
             return c.fetchall()
 
@@ -1421,6 +1583,8 @@ class FSMApp:
             self._log(f"DB cache has {cached_count:,} records — replaying to C++ (no disk scan needed)")
             self._file_count = cached_count
             self._update_title()
+            self._refresh_explorer_from_cache()
+            self._set_busy("Replaying cached index into the C++ engine...")
             # Replay in background thread so UI stays responsive
             threading.Thread(target=self._replay_from_cache, daemon=True).start()
         else:
@@ -1428,6 +1592,7 @@ class FSMApp:
             self._index_queue = self._get_real_user_folders()
             self._log(f"Found {len(self._index_queue)} real folder(s) to index: " +
                       ", ".join(os.path.basename(p) for p in self._index_queue))
+            self._set_busy("Scanning common folders for the first launch...")
             self._index_next()
 
     def _replay_from_cache(self):
@@ -1465,6 +1630,8 @@ class FSMApp:
         if not self._index_queue:
             self._indexing = False
             self._log("Background indexing complete — results saved to database")
+            self._refresh_explorer_from_cache()
+            self._clear_busy()
             return
         path = self._index_queue.pop(0)
         self._indexing = True
@@ -1475,6 +1642,7 @@ class FSMApp:
         except AttributeError:
             pass
         self._log(f"Scanning {path}  ({len(self._index_queue)} remaining) → will save to DB")
+        self._set_busy(f"Indexing {folder_name}... {len(self._index_queue)} folder(s) remaining")
         self.bridge.send(f"LOAD_DIR {path}", "startup_load_dir")
 
     # ── main UI ───────────────────────────────────────────────────
@@ -1497,6 +1665,34 @@ class FSMApp:
         kb = tk.Label(title_bar, text="Enter=Search  Ctrl+G=Generate",
                       bg=PANEL, fg=TEXT_DIM, font=("Consolas",8))
         kb.pack(side="right", padx=14)
+
+        self._busy_frame = tk.Frame(self.root, bg="#0f1724", height=28)
+        self._busy_frame.pack_propagate(False)
+        ttk.Style().configure(
+            "FSM.Horizontal.TProgressbar",
+            troughcolor="#0f1724",
+            bordercolor="#0f1724",
+            background=ACCENT,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT2,
+        )
+        self._busy_label = tk.Label(
+            self._busy_frame,
+            text="",
+            bg="#0f1724",
+            fg=TEXT,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self._busy_label.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=4)
+        self._busy_bar = ttk.Progressbar(
+            self._busy_frame,
+            mode="indeterminate",
+            style="FSM.Horizontal.TProgressbar",
+            length=160,
+        )
+        self._busy_bar.pack(side="right", padx=12, pady=7)
+        self._busy_visible = False
 
         # Main content area
         content = tk.Frame(self.root, bg=BG)
@@ -1548,7 +1744,42 @@ class FSMApp:
 
         # ── Activity Log (bottom strip) ───────────────────────
         self._build_activity_log()
+        self._toggle_log()
+        self._refresh_explorer_from_cache()
         self._log("App started — indexing system folders in background")
+
+    def _set_busy(self, message: str):
+        if not hasattr(self, "_busy_frame"):
+            return
+        self._busy_label.config(text=message)
+        if not self._busy_visible:
+            self._busy_frame.pack(fill="x", after=self.root.winfo_children()[0])
+            self._busy_visible = True
+        try:
+            self._busy_bar.start(12)
+        except tk.TclError:
+            pass
+
+    def _clear_busy(self):
+        if not hasattr(self, "_busy_frame"):
+            return
+        try:
+            self._busy_bar.stop()
+        except tk.TclError:
+            pass
+        if self._busy_visible:
+            self._busy_frame.pack_forget()
+            self._busy_visible = False
+
+    def _refresh_explorer_from_cache(self):
+        if not hasattr(self, "file_explorer"):
+            return
+        try:
+            records = self.cache.get_recent_records(500)
+            folders = [path for path, _ts, _count in self.cache.get_indexed_folders()]
+            self.file_explorer.load_records(records, folders)
+        except Exception as exc:
+            self._log(f"Explorer refresh skipped: {exc}")
 
     # ── queue polling ─────────────────────────────────────────────
     def _poll_queue(self):
@@ -1598,6 +1829,8 @@ class FSMApp:
                 count = int(parts[1]) if len(parts) > 1 else 0
                 self._log(f"Cache replay complete — {count:,} records loaded into C++ engine instantly")
                 self.anim_canvas.set_status(f"Loaded {count:,} files from database — search is ready")
+                self._refresh_explorer_from_cache()
+                self._clear_busy()
             return
 
         if tag.startswith("search_"):
@@ -1651,6 +1884,7 @@ class FSMApp:
             hops  = int(parts[7]) if len(parts) > 7 else 3
             self.anim_canvas.animate_bptree(tpath, True, hops)
             self.anim_canvas.set_status(f"Found in {hops} hops | O(log n) B+ Tree search")
+            self._clear_busy()
         else:
             hops = int(parts[4]) if len(parts) > 4 else 3
             self.anim_canvas.animate_bptree("root->node1->leaf3", False, hops)
@@ -1661,6 +1895,7 @@ class FSMApp:
             if raw_query:
                 self.query_panel.append_result(
                     f"# Not found in index. Searching real disk for '{raw_query}'…")
+                self._set_busy(f"Searching real disk for '{raw_query}'...")
                 self._os_search(raw_query)
 
     def _handle_prefix_result(self, lines: list):
@@ -1674,6 +1909,7 @@ class FSMApp:
         count = len(names)
         self.anim_canvas.animate_trie(tpath.replace("->",""), count)
         self.anim_canvas.set_status(f"Trie prefix match | {count} file(s) | O(m) lookup")
+        self._clear_busy()
 
     def _handle_size_result(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1682,6 +1918,7 @@ class FSMApp:
         cnt = parts[3] if len(parts)>3 else "?"
         self.anim_canvas.animate_segtree(1, 6, 0)
         self.anim_canvas.set_status(f"Size range result | {cnt} file(s) | SegmentTree")
+        self._clear_busy()
 
     def _handle_date_result(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1692,6 +1929,7 @@ class FSMApp:
             m2 = int(p[3]) if len(p)>3 else 12
             self.anim_canvas.animate_segtree(m1, m2, mb)
             self.anim_canvas.set_status(f"Date range | Total {mb:.2f} MB | SegmentTree")
+        self._clear_busy()
 
     def _handle_duplicates(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1702,12 +1940,14 @@ class FSMApp:
                 self.anim_canvas.set_status(
                     f"Duplicates | {p[1] if len(p)>1 else '?'} groups | "
                     f"{p[2] if len(p)>2 else '?'} MB wasted")
+        self._clear_busy()
 
     def _handle_orphans(self, lines: list):
         self.query_panel.show_result(lines)
         orphan_count = len([l for l in lines if l.startswith("ORPHAN|")])
         self.anim_canvas.animate_unionfind(orphan_count)
         self.anim_canvas.set_status(f"Orphan detection | {orphan_count} orphan(s) | UnionFind O(α(n))")
+        self._clear_busy()
 
     def _handle_analytics(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1722,10 +1962,12 @@ class FSMApp:
         self.query_panel.update_chart(month_data)
         total = sum(month_data.values())
         self.anim_canvas.set_status(f"Storage analytics | Total {total:.2f} MB | SegmentTree O(log n)")
+        self._clear_busy()
 
     def _handle_benchmark(self, lines: list):
         self.query_panel.show_result(lines)
         self.anim_canvas.set_status("Benchmark complete | See results panel")
+        self._clear_busy()
 
     def _handle_generate(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1738,6 +1980,7 @@ class FSMApp:
                     self._update_title()
                 except ValueError:
                     pass
+        self._clear_busy()
 
     def _handle_load_dir(self, lines: list):
         self.query_panel.show_result(lines)
@@ -1751,6 +1994,7 @@ class FSMApp:
                     self.file_explorer.set_file_count(self._file_count)
                 except ValueError:
                     pass
+        self._clear_busy()
 
     # ── live OS fallback search ───────────────────────────────────
     def _os_search(self, query: str):
@@ -1817,6 +2061,8 @@ class FSMApp:
             self.query_panel.show_result(
                 [f"ERROR|OS Search|No files matching '{query}' found anywhere on system"])
             self.anim_canvas.set_status(f"OS search complete — no match for '{query}'")
+            self._refresh_explorer_from_cache()
+            self._clear_busy()
             return
         lines = [f"# OS Search results for '{query}' ({len(results)} found)"]
         for fname, fpath, sz in results[:100]:
@@ -1825,6 +2071,8 @@ class FSMApp:
         self.query_panel.show_result(lines)
         self.anim_canvas.set_status(
             f"OS search — {len(results)} real file(s) found matching '{query}'")
+        self._refresh_explorer_from_cache()
+        self._clear_busy()
         # Also send the first result to the C++ index so it's searchable next time
         if results:
             fname, fpath, sz = results[0]
@@ -1848,6 +2096,7 @@ class FSMApp:
             self._last_prefix = prefix
             self.anim_canvas.set_ds("Trie")
             self.anim_canvas.show_spinner(f"Prefix search: {prefix}…")
+            self._set_busy(f"Running prefix search for '{prefix}'...")
             self.query_panel.set_ds_badge("Trie",
                 "Trie provides O(m) prefix lookups where m is the prefix length.")
             self.bridge.send(f"PREFIX {prefix}", f"prefix_{query}")
@@ -1856,6 +2105,7 @@ class FSMApp:
             if len(parts) == 2:
                 self.anim_canvas.set_ds("SegmentTree")
                 self.anim_canvas.show_spinner("Size range search…")
+                self._set_busy(f"Running size range query: {parts[0]}-{parts[1]} KB...")
                 self.query_panel.set_ds_badge("SegmentTree",
                     "Segment Tree enables O(log n) range queries over file sizes.")
                 self.bridge.send(f"SIZE_RANGE {parts[0]} {parts[1]}", "size_range")
@@ -1866,6 +2116,7 @@ class FSMApp:
             m2 = m_map.get(rest[-1].lower(), "12") if len(rest)>1 else m1
             self.anim_canvas.set_ds("SegmentTree")
             self.anim_canvas.show_spinner("Date range query…")
+            self._set_busy("Running date range analytics query...")
             self.query_panel.set_ds_badge("SegmentTree",
                 "Segment Tree enables O(log n) range sum queries over day-indexed storage.")
             self.bridge.send(f"DATE_RANGE {m1} {m2}", "date_range")
@@ -1873,6 +2124,7 @@ class FSMApp:
             # Exact search
             self.anim_canvas.set_ds("BPlusTree")
             self.anim_canvas.show_spinner(f"Searching: {query}…")
+            self._set_busy(f"Searching index for '{query}'...")
             self.query_panel.set_ds_badge("BPlusTree",
                 "B+ Tree allows O(log n) exact key lookup using the filename as the sorted key.")
             self.bridge.send(f"SEARCH {query}", f"search_{query}")
@@ -1886,6 +2138,7 @@ class FSMApp:
         self._log(f"Manual scan: {path} → will save to DB")
         self._current_scan_path = path
         self.anim_canvas.show_spinner("Scanning folder…")
+        self._set_busy(f"Scanning {os.path.basename(path) or path}...")
         self.query_panel.clear_results()
         self.bridge.send(f"LOAD_DIR {path}", "load_dir")
 
@@ -1908,17 +2161,20 @@ class FSMApp:
         self._indexed_paths = getattr(self, "_indexed_paths", set()) | set(self._index_queue)
         self.query_panel.clear_results()
         self.anim_canvas.show_spinner("Indexing system folders…")
+        self._set_busy("Indexing your common system folders...")
         self._index_next()
 
     def _on_generate(self):
         self._log("Generating 1000 demo files…")
         self.anim_canvas.show_spinner("Generating 1000 files…")
+        self._set_busy("Generating demo data in the C++ engine...")
         self.query_panel.clear_results()
         self.bridge.send("GENERATE 1000", "generate")
 
     def _on_duplicates(self):
         self.anim_canvas.set_ds("BPlusTree")
         self.anim_canvas.show_spinner("Finding duplicates…")
+        self._set_busy("Scanning indexed files for duplicate checksums...")
         self.query_panel.clear_results()
         self.query_panel.set_ds_badge("BPlusTree",
             "B+ Tree iterates all leaves and groups by checksum to detect duplicates.")
@@ -1927,6 +2183,7 @@ class FSMApp:
     def _on_orphans(self):
         self.anim_canvas.set_ds("UnionFind")
         self.anim_canvas.show_spinner("Detecting orphans…")
+        self._set_busy("Evaluating connectivity to find orphan files...")
         self.query_panel.clear_results()
         self.query_panel.set_ds_badge("UnionFind",
             "Union-Find identifies files not connected to the root directory component.")
@@ -1935,6 +2192,7 @@ class FSMApp:
     def _on_analytics(self):
         self.anim_canvas.set_ds("SegmentTree")
         self.anim_canvas.show_spinner("Computing analytics…")
+        self._set_busy("Computing monthly storage analytics...")
         self.query_panel.clear_results()
         self.query_panel.set_ds_badge("SegmentTree",
             "Segment Tree provides O(log n) range sum queries for monthly storage analytics.")
@@ -1943,6 +2201,7 @@ class FSMApp:
     def _on_benchmark(self):
         self.anim_canvas.set_ds("BPlusTree")
         self.anim_canvas.show_spinner("Running benchmark…")
+        self._set_busy("Benchmarking DS search against linear scan...")
         self.query_panel.clear_results()
         self.bridge.send("BENCHMARK", "benchmark")
 
@@ -1952,11 +2211,14 @@ class FSMApp:
         import time as _time
         self._log_visible = True
 
+        self._log_shell = tk.Frame(self.root, bg=BG)
+        self._log_shell.pack(fill="x", side="bottom")
+
         # Separator
-        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", side="bottom")
+        tk.Frame(self._log_shell, bg=BORDER, height=1).pack(fill="x", side="top")
 
         # Log container
-        self._log_frame = tk.Frame(self.root, bg="#0a0d12", height=120)
+        self._log_frame = tk.Frame(self._log_shell, bg="#0a0d12", height=120)
         self._log_frame.pack(fill="x", side="bottom")
         self._log_frame.pack_propagate(False)
 
@@ -2049,10 +2311,10 @@ class FSMApp:
     def _toggle_log(self):
         """Show/hide the activity log strip."""
         if self._log_visible:
-            self._log_frame.pack_forget()
+            self._log_shell.pack_forget()
             self._log_visible = False
         else:
-            self._log_frame.pack(fill="x", side="bottom")
+            self._log_shell.pack(fill="x", side="bottom")
             self._log_visible = True
 
     def _update_title(self):
@@ -2080,6 +2342,10 @@ class FSMApp:
         if file_list:
             self.cache.save_scan_results(folder_path, file_list)
             self._log(f"DB saved: {len(file_list):,} records from {os.path.basename(folder_path)}")
+            try:
+                self.root.after(0, self._refresh_explorer_from_cache)
+            except Exception:
+                pass
 
     def on_close(self):
         try:

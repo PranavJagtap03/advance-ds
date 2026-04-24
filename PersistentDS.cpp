@@ -6,7 +6,6 @@ using namespace std;
 void PersistentDS::saveVersion(FileNode& f) {
     f.version = (int)history[f.id].size() + 1;
     history[f.id].push_back(f);
-    cout << "Version " << f.version << " saved: " << f.name << endl;
 }
 FileNode PersistentDS::getVersion(int fileId, int version) {
     if (!history.count(fileId)) { cout << "File not found\n"; return FileNode(); }
@@ -23,7 +22,8 @@ void PersistentDS::showHistory(int fileId) {
 bool PersistentDS::rollback(int fileId, int version, BPlusTree& bpt) {
     FileNode old = getVersion(fileId, version);
     if (old.id == -1) { cout << "Rollback failed.\n"; return false; }
-    bpt.remove(old.name);
+    FileNode current = history[fileId].back();
+    bpt.remove(current.name);
     bpt.insert(old.name, old);
     cout << "Successfully rolled back to version " << version << "\n";
     return true;
