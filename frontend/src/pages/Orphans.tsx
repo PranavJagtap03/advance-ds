@@ -12,7 +12,7 @@ interface BrokenLink {
 const Orphans = () => {
     const { sendCommand, subscribe } = useEngine();
     const [links, setLinks] = useState<BrokenLink[]>([]);
-    const [totalWastedKB, setTotalWastedKB] = useState(0);
+    const [totalWastedMB, setTotalWastedMB] = useState(0);
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
@@ -30,7 +30,7 @@ const Orphans = () => {
             if (line.startsWith('ORPHAN_DONE')) {
                 const parts = line.split('|');
                 setLinks([...items]);
-                setTotalWastedKB(parseFloat(parts[2]) * 1024);
+                setTotalWastedMB(parseFloat(parts[2]));
                 setLoading(false);
             }
         });
@@ -98,7 +98,7 @@ const Orphans = () => {
                         </div>
                         <div className="text-right">
                             <p className="text-[10px] font-bold text-outline uppercase tracking-widest">Total Wasted</p>
-                            <p className="text-2xl font-black text-on-surface">{(totalWastedKB / 1024).toFixed(1)} MB</p>
+                            <p className="text-2xl font-black text-on-surface">{totalWastedMB.toFixed(1)} MB</p>
                         </div>
                     </div>
 

@@ -38,23 +38,6 @@ const Search = () => {
                     type: EXTENSION_MAP[ext] || 'Other'
                 }]);
                 setSearching(false);
-            } else if (line.startsWith('RESULT|PREFIX')) {
-                const parts = line.split('|');
-                const namesString = parts[2] || '';
-                if (namesString) {
-                    const namesList = namesString.split(',').filter(n => n.trim().length > 0);
-                    const parsedResults = namesList.map(n => {
-                        const ext = n.split('.').pop()?.toLowerCase() || '';
-                        return {
-                            name: n,
-                            path: 'Multiple paths indexed',
-                            sizeKB: '--',
-                            type: EXTENSION_MAP[ext] || 'Other'
-                        };
-                    });
-                    setResults(prev => [...prev, ...parsedResults]);
-                }
-                setSearching(false);
             } else if (line.startsWith('RESULT|NOT_FOUND')) {
                 setSearching(false);
             }

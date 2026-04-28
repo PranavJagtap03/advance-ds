@@ -2,6 +2,7 @@
 #include "FileNode.h"
 #include <vector>
 #include <string>
+#include <algorithm>
 
 using namespace std;
 
@@ -31,6 +32,9 @@ class BPlusTree {
 private:
     BPlusNode* root;
 
+    // E-1: Secondary index sorted by (size, key) for O(log n) size range queries
+    vector<pair<long, string>> sizeIndex;
+
     // Helper to split a child node
     void splitChild(BPlusNode* parent, int i, BPlusNode* child);
     
@@ -45,6 +49,9 @@ private:
     
     // Helper to destroy the tree
     void destroyTree(BPlusNode* node);
+
+    // C-3: Recursive remove helper with underflow propagation
+    void removeHelper(BPlusNode* node, BPlusNode* parent, int childIndex, string key, bool& underflow);
 
     // Helper: search node and build traversal path (recursive)
     // nodeIdx is an incrementing counter for naming internal nodes
@@ -65,13 +72,13 @@ public:
     // Searches for a file node by key
     FileNode* search(string key);
     
-    // Removes a key from the tree
+    // Removes a key from the tree (C-3: with underflow propagation + root collapse)
     void remove(string key);
     
     // Performs a range search between k1 and k2
     vector<FileNode> rangeSearch(string k1, string k2);
     
-    // Searches for files within a size range using linear scan of getAllLeaves()
+    // E-1: O(log n) size range search using secondary sizeIndex
     vector<FileNode> searchBySize(long minSize, long maxSize);
     
     // Gets all leaf nodes in the tree
@@ -83,11 +90,11 @@ public:
     // Displays the tree structure visually
     void display();
 
-    // ── NEW: returns the found FileNode* plus a human-readable traversal path.
+    // ── Returns the found FileNode* plus a human-readable traversal path.
     // Path format: "root->nodeN->...->leafM  [H hops]"
     pair<FileNode*, string> searchWithPath(string key);
 
-    // ── NEW: range search that also returns traversal path per result.
+    // ── Range search that also returns traversal path per result.
     // Each pair: {FileNode, path_string}
     vector<pair<FileNode*, string>> rangeSearchWithPath(string k1, string k2);
 };

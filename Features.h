@@ -227,22 +227,23 @@ inline void benchmark() {
 inline void stressTest() {
     int passedCount = 0;
 
-    // Test 1 — BPlusTree
+    // Test 1 — BPlusTree (H-7: uses local tree to avoid polluting global bpt)
     int bptErrors = 0;
+    BPlusTree testBpt;
     vector<string> names(50000);
     for (int i = 0; i < 50000; i++) {
         FileNode f;
         f.name = "stress_" + to_string(i);
-        bpt.insert(f.name, f);
+        testBpt.insert(f.name, f);
         names[i] = f.name;
     }
     for (int i = 0; i < 1000; i++) {
-        if (bpt.search(names[rand() % 50000]) == nullptr) bptErrors++;
+        if (testBpt.search(names[rand() % 50000]) == nullptr) bptErrors++;
     }
     for (int i = 0; i < 5000; i++) {
         string delName = names[rand() % 50000];
-        bpt.remove(delName);
-        if (bpt.search(delName) != nullptr) bptErrors++; 
+        testBpt.remove(delName);
+        if (testBpt.search(delName) != nullptr) bptErrors++; 
     }
     
     if (bptErrors == 0) {

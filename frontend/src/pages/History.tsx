@@ -17,6 +17,8 @@ const History = () => {
     const [fileId, setFileId] = useState('');
     const [versions, setVersions] = useState<Version[]>([]);
     const [loading, setLoading] = useState(false);
+    // E-2: Inline rollback status
+    const [rollbackStatus, setRollbackStatus] = useState<string | null>(null);
 
     useEffect(() => {
         const unsub = subscribe('history', (line) => {
@@ -35,9 +37,21 @@ const History = () => {
             if (line.startsWith('VERSION_DONE')) {
                 setLoading(false);
             }
+            // E-2: Show inline status for rollback results
             if (line.startsWith('ROLLBACK_OK')) {
-                alert('Rollback successful!');
+                const parts = line.split('|');
+                const suffix = parts[3] || '';
+                if (suffix === 'METADATA_ONLY') {
+                    setRollbackStatus('Rollback successful (metadata only — no physical backup was available)');
+                } else {
+                    setRollbackStatus('Rollback successful — file fully restored!');
+                }
                 fetchHistory();
+                setTimeout(() => setRollbackStatus(null), 5000);
+            }
+            if (line.startsWith('ROLLBACK_ERROR')) {
+                setRollbackStatus('Rollback failed: ' + (line.split('|')[1] || 'unknown error'));
+                setTimeout(() => setRollbackStatus(null), 5000);
             }
         });
         return () => unsub();
@@ -52,6 +66,7 @@ const History = () => {
 
     const handleRollback = (ver: number) => {
         if (confirm(`Roll back to version ${ver}? Current file will be overwritten.`)) {
+            setRollbackStatus(null);
             sendCommand(`ROLLBACK ${fileId} ${ver}`, 'history');
         }
     };
@@ -95,6 +110,13 @@ const History = () => {
                     VIEW HISTORY
                 </button>
             </div>
+
+            {/* E-2: Inline rollback status */}
+            {rollbackStatus && (
+                <div className={`p-4 rounded-2xl text-sm font-bold flex items-center gap-3 ${rollbackStatus.includes('failed') ? 'bg-error/10 text-error border border-error/20' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+                    {rollbackStatus}
+                </div>
+            )}
 
             <div className="flex-1 overflow-auto space-y-4 custom-scrollbar pr-2">
                 {versions.length === 0 ? (

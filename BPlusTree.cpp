@@ -2,6 +2,7 @@
 #include <iostream>
 #include <queue>
 #include <sstream>
+#include <algorithm>
 
 // 1. Constructor — root is instantiated as a newly created leaf node.
 BPlusTree::BPlusTree() {
@@ -30,13 +31,13 @@ FileNode* BPlusTree::searchNode(BPlusNode* node, string key) {
     if (!node) return nullptr;
     
     int i = 0;
-    while (i < node->keys.size() && key > node->keys[i]) {
+    while (i < (int)node->keys.size() && key > node->keys[i]) {
         i++;
     }
     
     if (node->isLeaf) {
         // If leaf: linear scan keys, return &values[i] if found, else nullptr
-        if (i < node->keys.size() && node->keys[i] == key) {
+        if (i < (int)node->keys.size() && node->keys[i] == key) {
             return &(node->values[i]);
         }
         return nullptr;
@@ -78,7 +79,7 @@ void BPlusTree::insertNonFull(BPlusNode* node, string key, FileNode val) {
         i++; // the proper child index
         
         // If child full, split it first, then recurse
-        if (node->children[i]->keys.size() == ORDER - 1) {
+        if ((int)node->children[i]->keys.size() == ORDER - 1) {
             splitChild(node, i, node->children[i]);
             if (key > node->keys[i]) {
                 i++;
@@ -125,14 +126,14 @@ void BPlusTree::splitChild(BPlusNode* parent, int i, BPlusNode* child) {
     }
 }
 
-// 8. insert(key, val)
+// 8. insert(key, val) — also maintains sizeIndex (E-1)
 void BPlusTree::insert(string key, FileNode val) {
     if (!root) {
         root = new BPlusNode(true);
     }
     
     // If root is full: create new root, old root becomes child, splitChild, insertNonFull
-    if (root->keys.size() == ORDER - 1) {
+    if ((int)root->keys.size() == ORDER - 1) {
         BPlusNode* oldRoot = root;
         root = new BPlusNode(false);
         root->children.push_back(oldRoot);
@@ -142,6 +143,11 @@ void BPlusTree::insert(string key, FileNode val) {
     } else {
         insertNonFull(root, key, val);
     }
+
+    // E-1: Maintain sorted sizeIndex
+    pair<long, string> entry = {val.size, key};
+    auto pos = lower_bound(sizeIndex.begin(), sizeIndex.end(), entry);
+    sizeIndex.insert(pos, entry);
 }
 
 // 9. collectLeaves(node, result)
@@ -180,13 +186,13 @@ vector<FileNode> BPlusTree::rangeSearch(string k1, string k2) {
     // Find the leaf that would contain k1
     while (!curr->isLeaf) {
         int i = 0;
-        while (i < curr->keys.size() && k1 > curr->keys[i]) i++;
+        while (i < (int)curr->keys.size() && k1 > curr->keys[i]) i++;
         curr = curr->children[i];
     }
     
     // Walk the leaf linked list, collecting FileNodes between k1 and k2
     while (curr) {
-        for (int i = 0; i < curr->keys.size(); i++) {
+        for (int i = 0; i < (int)curr->keys.size(); i++) {
             if (curr->keys[i] >= k1 && curr->keys[i] <= k2) {
                 result.push_back(curr->values[i]);
             } else if (curr->keys[i] > k2) {
@@ -199,18 +205,16 @@ vector<FileNode> BPlusTree::rangeSearch(string k1, string k2) {
     return result;
 }
 
-// 12. searchBySize(minSize, maxSize)
+// 12. searchBySize(minSize, maxSize) — E-1: O(log n) using sizeIndex
 vector<FileNode> BPlusTree::searchBySize(long minSize, long maxSize) {
-    vector<FileNode> all = getAllLeaves();
     vector<FileNode> result;
     
-    // Filter the items where size >= minSize && size <= maxSize
-    for (const auto& f : all) {
-        if (f.size >= minSize && f.size <= maxSize) {
-            result.push_back(f);
-        }
+    auto lo = lower_bound(sizeIndex.begin(), sizeIndex.end(), make_pair(minSize, string("")));
+    for (auto it = lo; it != sizeIndex.end() && it->first <= maxSize; ++it) {
+        FileNode* fn = search(it->second);
+        if (fn) result.push_back(*fn);
     }
-    return result; // return filtered vector
+    return result;
 }
 
 // 13. getSize()
@@ -218,81 +222,111 @@ int BPlusTree::getSize() {
     return getAllLeaves().size();
 }
 
-// 14. remove(key)
-void BPlusTree::remove(string key) {
-    if (!root) return;
-    
-    BPlusNode* curr = root;
-    BPlusNode* parent = nullptr;
-    int childIndex = -1;
-    
-    // Find leaf containing key
-    while (!curr->isLeaf) {
-        int i = 0;
-        while (i < curr->keys.size() && key > curr->keys[i]) i++;
-        parent = curr;
-        childIndex = i;
-        curr = curr->children[i];
-    }
-    
-    bool found = false;
-    // Remove key+value from leaf
-    for (int i = 0; i < curr->keys.size(); i++) {
-        if (curr->keys[i] == key) {
-            curr->keys.erase(curr->keys.begin() + i);
-            curr->values.erase(curr->values.begin() + i);
-            found = true;
-            break;
+// 14. removeHelper — C-3: recursive underflow propagation
+void BPlusTree::removeHelper(BPlusNode* node, BPlusNode* parent, int childIndex, string key, bool& underflow) {
+    if (!node) return;
+
+    if (node->isLeaf) {
+        // Find and remove the key from the leaf
+        bool found = false;
+        for (int i = 0; i < (int)node->keys.size(); i++) {
+            if (node->keys[i] == key) {
+                node->keys.erase(node->keys.begin() + i);
+                node->values.erase(node->values.begin() + i);
+                found = true;
+                break;
+            }
         }
-    }
-    
-    // Print warning if missing
-    if (!found) {
-        cout << "File not found: " << key << endl;
+        if (!found) return;
+
+        int minKeys = (ORDER - 1) / 2;
+        if (node != root && (int)node->keys.size() < minKeys) {
+            underflow = true;
+        }
         return;
     }
-    
-    // Check if leaf has too few keys: borrow from sibling or merge
+
+    // Internal node: find the child to recurse into
+    int i = 0;
+    while (i < (int)node->keys.size() && key > node->keys[i]) i++;
+
+    bool childUnderflow = false;
+    removeHelper(node->children[i], node, i, key, childUnderflow);
+
+    if (!childUnderflow) return;
+
+    // Handle underflow in child at index i
+    BPlusNode* child = node->children[i];
     int minKeys = (ORDER - 1) / 2;
-    if (curr != root && curr->keys.size() < minKeys) {
-        BPlusNode* leftSib = (childIndex > 0) ? parent->children[childIndex - 1] : nullptr;
-        BPlusNode* rightSib = (childIndex < parent->children.size() - 1) ? parent->children[childIndex + 1] : nullptr;
-        
-        if (leftSib && leftSib->keys.size() > minKeys) {
-            // Borrow from left sibling
-            curr->keys.insert(curr->keys.begin(), leftSib->keys.back());
-            curr->values.insert(curr->values.begin(), leftSib->values.back());
-            leftSib->keys.pop_back();
-            leftSib->values.pop_back();
-            parent->keys[childIndex - 1] = curr->keys[0];
-        } else if (rightSib && rightSib->keys.size() > minKeys) {
-            // Borrow from right sibling
-            curr->keys.push_back(rightSib->keys.front());
-            curr->values.push_back(rightSib->values.front());
-            rightSib->keys.erase(rightSib->keys.begin());
-            rightSib->values.erase(rightSib->values.begin());
-            parent->keys[childIndex] = rightSib->keys[0];
-        } else if (leftSib) {
-            // Merge with left sibling
-            leftSib->keys.insert(leftSib->keys.end(), curr->keys.begin(), curr->keys.end());
-            leftSib->values.insert(leftSib->values.end(), curr->values.begin(), curr->values.end());
-            leftSib->next = curr->next;
-            parent->keys.erase(parent->keys.begin() + childIndex - 1);
-            parent->children.erase(parent->children.begin() + childIndex);
-            delete curr;
-        } else if (rightSib) {
-            // Merge with right sibling
-            curr->keys.insert(curr->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
-            curr->values.insert(curr->values.end(), rightSib->values.begin(), rightSib->values.end());
-            curr->next = rightSib->next;
-            parent->keys.erase(parent->keys.begin() + childIndex);
-            parent->children.erase(parent->children.begin() + childIndex + 1);
-            delete rightSib;
+    BPlusNode* leftSib = (i > 0) ? node->children[i - 1] : nullptr;
+    BPlusNode* rightSib = (i < (int)node->children.size() - 1) ? node->children[i + 1] : nullptr;
+
+    if (leftSib && (int)leftSib->keys.size() > minKeys) {
+        // Borrow from left sibling
+        child->keys.insert(child->keys.begin(), leftSib->keys.back());
+        child->values.insert(child->values.begin(), leftSib->values.back());
+        leftSib->keys.pop_back();
+        leftSib->values.pop_back();
+        node->keys[i - 1] = child->keys[0];
+    } else if (rightSib && (int)rightSib->keys.size() > minKeys) {
+        // Borrow from right sibling — M-2: update parent key AFTER erase
+        child->keys.push_back(rightSib->keys.front());
+        child->values.push_back(rightSib->values.front());
+        rightSib->keys.erase(rightSib->keys.begin());
+        rightSib->values.erase(rightSib->values.begin());
+        node->keys[i] = rightSib->keys[0]; // M-2: correctly uses new first key
+    } else if (leftSib) {
+        // Merge with left sibling
+        leftSib->keys.insert(leftSib->keys.end(), child->keys.begin(), child->keys.end());
+        leftSib->values.insert(leftSib->values.end(), child->values.begin(), child->values.end());
+        leftSib->next = child->next;
+        node->keys.erase(node->keys.begin() + i - 1);
+        node->children.erase(node->children.begin() + i);
+        delete child;
+    } else if (rightSib) {
+        // Merge with right sibling
+        child->keys.insert(child->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
+        child->values.insert(child->values.end(), rightSib->values.begin(), rightSib->values.end());
+        child->next = rightSib->next;
+        node->keys.erase(node->keys.begin() + i);
+        node->children.erase(node->children.begin() + i + 1);
+        delete rightSib;
+    }
+
+    // Propagate underflow upward
+    if (node != root && (int)node->keys.size() < minKeys) {
+        underflow = true;
+    }
+}
+
+// 15. remove(key) — C-3: with root collapse
+void BPlusTree::remove(string key) {
+    if (!root) return;
+
+    bool underflow = false;
+    removeHelper(root, nullptr, -1, key, underflow);
+
+    // Root collapse: if root is internal with 0 keys and 1 child, replace root
+    if (!root->isLeaf && root->keys.empty() && !root->children.empty()) {
+        BPlusNode* newRoot = root->children[0];
+        delete root;
+        root = newRoot;
+    }
+
+    // E-1: Remove from sizeIndex
+    FileNode* check = search(key);
+    if (!check) {
+        // Key was removed — find and erase from sizeIndex by key match
+        for (auto it = sizeIndex.begin(); it != sizeIndex.end(); ++it) {
+            if (it->second == key) {
+                sizeIndex.erase(it);
+                break;
+            }
         }
     }
 }
 
-// 15. display()
+// 16. display()
 void BPlusTree::display() {
     if (!root || (root->isLeaf && root->keys.empty())) return;
     
@@ -311,9 +345,9 @@ void BPlusTree::display() {
             
             // Print keys properly formatted inside brackets
             cout << "[";
-            for (int i = 0; i < curr->keys.size(); i++) {
+            for (int i = 0; i < (int)curr->keys.size(); i++) {
                 cout << curr->keys[i];
-                if (i != curr->keys.size() - 1) cout << ", ";
+                if (i != (int)curr->keys.size() - 1) cout << ", ";
             }
             cout << "]";
             
@@ -333,9 +367,7 @@ void BPlusTree::display() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 16. searchNodeWithPath — private recursive helper
-//     Traverses the tree just like searchNode() but appends node labels
-//     to 'path' and increments 'hops' at every level descent.
+// 17. searchNodeWithPath — private recursive helper
 // ─────────────────────────────────────────────────────────────────────
 FileNode* BPlusTree::searchNodeWithPath(BPlusNode* node, string key,
                                          string& path, int& hops,
@@ -374,41 +406,35 @@ FileNode* BPlusTree::searchNodeWithPath(BPlusNode* node, string key,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 17. searchWithPath(key) — public
-//     Returns {FileNode*, traversal_path_with_hop_count}
+// 18. searchWithPath(key) — public
 // ─────────────────────────────────────────────────────────────────────
 pair<FileNode*, string> BPlusTree::searchWithPath(string key) {
     if (!root) return {nullptr, "empty_tree"};
 
     string path;
     int hops = 0;
-    int nodeCounter = 1; // counter for naming non-root nodes
+    int nodeCounter = 1;
 
     FileNode* result = searchNodeWithPath(root, key, path, hops, nodeCounter);
 
-    // Append hop count to the path string
     path += "  [" + to_string(hops) + " hop" + (hops == 1 ? "" : "s") + "]";
 
     return {result, path};
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 18. rangeSearchWithPath(k1, k2) — public
-//     Performs leaf-chain range scan and returns path taken to the first
-//     leaf, together with all matched FileNodes.
+// 19. rangeSearchWithPath(k1, k2) — public
 // ─────────────────────────────────────────────────────────────────────
 vector<pair<FileNode*, string>> BPlusTree::rangeSearchWithPath(string k1, string k2) {
     vector<pair<FileNode*, string>> result;
     if (!root) return result;
 
-    // Build traversal path down to the start leaf
     string path;
     int hops = 0;
     int nodeCounter = 1;
 
     BPlusNode* curr = root;
 
-    // Traverse internal nodes, recording path
     while (!curr->isLeaf) {
         string label = (curr == root) ? "root" : "node" + to_string(nodeCounter++);
         if (!path.empty()) path += "->";
@@ -420,7 +446,6 @@ vector<pair<FileNode*, string>> BPlusTree::rangeSearchWithPath(string k1, string
         hops++;
     }
 
-    // Record the first leaf
     string leafLabel = "leaf" + to_string(nodeCounter++);
     if (!path.empty()) path += "->";
     path += leafLabel;
@@ -428,7 +453,6 @@ vector<pair<FileNode*, string>> BPlusTree::rangeSearchWithPath(string k1, string
 
     string basePath = path + "  [" + to_string(hops) + " hop" + (hops == 1 ? "" : "s") + "]";
 
-    // Walk the leaf linked list collecting results
     while (curr) {
         for (int i = 0; i < (int)curr->keys.size(); i++) {
             if (curr->keys[i] >= k1 && curr->keys[i] <= k2) {

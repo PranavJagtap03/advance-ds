@@ -1,5 +1,6 @@
 import { Outlet, NavLink } from 'react-router-dom';
 import { useEngine } from '../contexts/EngineContext';
+import ErrorBoundary from '../components/ErrorBoundary';
 import { 
     FolderSearch, 
     LayoutDashboard, 
@@ -91,7 +92,9 @@ const AppLayout = () => {
                 
                 <div className="flex-1 overflow-y-auto custom-scrollbar">
                     <div className="max-w-[1400px] mx-auto p-10 h-full">
-                        <Outlet />
+                        <ErrorBoundary>
+                            <Outlet />
+                        </ErrorBoundary>
                     </div>
                 </div>
             </main>

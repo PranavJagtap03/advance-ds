@@ -28,12 +28,35 @@
 
 using namespace std;
 
+// M-5: Thread-safe localtime wrapper
+static bool safeLocaltime(const long* ts, struct tm* out) {
+    time_t t = (time_t)*ts;
+#if defined(_MSC_VER)
+    return localtime_s(out, &t) == 0;
+#else
+    struct tm* tmp = localtime(&t);
+    if (!tmp) return false;
+    *out = *tmp;
+    return true;
+#endif
+}
+
+// C-5: Compute 10-year day index (0-3649)
+static int computeDayIndex(long ts) {
+    struct tm ti{};
+    if (!safeLocaltime(&ts, &ti)) return 0;
+    int yearOff = ti.tm_year - 120; // years since 2020
+    if (yearOff < 0) yearOff = 0;
+    if (yearOff > 9) yearOff = 9;
+    return yearOff * 365 + ti.tm_yday;
+}
+
 // ═══════════════════════════════════
 // GLOBALS
 // ═══════════════════════════════════
 BPlusTree bpt;
 Trie trie;
-SegmentTree segTree(365);
+SegmentTree segTree(3650);
 PersistentDS pds;
 UnionFind uf;
 vector<int> allFileIds;
@@ -69,44 +92,43 @@ static string unsafe(const string& s) {
 }
 
 void loadSnapshots() {
-    ifstream ifs("snapshots.dat", ios::binary);
+    ifstream ifs("snapshots.dat");
     if (!ifs) return;
-    while (ifs) {
+    string header;
+    while (getline(ifs, header)) {
+        if (header != "SNAPSHOT_V1") continue;
         Snapshot s;
-        if (!(ifs.read((char*)&s.id, sizeof(s.id)))) break;
-        ifs.read((char*)&s.timestamp, sizeof(s.timestamp));
-        if (!(ifs.read((char*)&s.fileCount, sizeof(s.fileCount)))) break;
-        if (s.fileCount < 0 || s.fileCount > 10000000) break; // Validation
-        ifs.read((char*)&s.totalBytes, sizeof(s.totalBytes));
+        string meta;
+        if (!getline(ifs, meta)) break;
+        istringstream mss(meta);
+        mss >> s.id >> s.timestamp >> s.fileCount >> s.totalBytes;
+        if (s.fileCount < 0 || s.fileCount > 10000000) break;
         for (int i = 0; i < s.fileCount; i++) {
-            int len; 
-            if (!(ifs.read((char*)&len, sizeof(len)))) break;
-            if (len < 0 || len > 4096) break;
-            string path(len, ' '); ifs.read(&path[0], len);
-            long long sz; ifs.read((char*)&sz, sizeof(sz));
+            string fline;
+            if (!getline(ifs, fline)) break;
+            size_t sp = fline.rfind(' ');
+            if (sp == string::npos) continue;
+            string path = fline.substr(0, sp);
+            long long sz = stoll(fline.substr(sp + 1));
             s.fileMap[path] = sz;
         }
+        string endLine;
+        getline(ifs, endLine); // consume END
         snapshots.push_back(s);
         if (s.id >= nextSnapshotId) nextSnapshotId = s.id + 1;
     }
 }
 
 void saveSnapshots() {
-    ofstream ofs("snapshots.dat", ios::binary | ios::trunc);
+    ofstream ofs("snapshots.dat", ios::trunc);
     for (size_t i = 0; i < snapshots.size(); i++) {
         const auto& s = snapshots[i];
-        ofs.write((char*)&s.id, sizeof(s.id));
-        ofs.write((char*)&s.timestamp, sizeof(s.timestamp));
-        ofs.write((char*)&s.fileCount, sizeof(s.fileCount));
-        ofs.write((char*)&s.totalBytes, sizeof(s.totalBytes));
+        ofs << "SNAPSHOT_V1" << "\n";
+        ofs << s.id << " " << s.timestamp << " " << s.fileCount << " " << s.totalBytes << "\n";
         for (auto it = s.fileMap.begin(); it != s.fileMap.end(); ++it) {
-            string path = it->first;
-            long long sz = it->second;
-            int len = (int)path.length();
-            ofs.write((char*)&len, sizeof(len));
-            ofs.write(path.c_str(), len);
-            ofs.write((char*)&sz, sizeof(sz));
+            ofs << it->first << " " << it->second << "\n";
         }
+        ofs << "END" << "\n";
     }
 }
 
@@ -172,9 +194,8 @@ pair<int,long> loadDirectory(const string& dirPath, int parentId = 0) {
             int id = nextFileId++;
             FileNode f(fname, fullPath, parentId, fileSize, ts, false); 
             f.id = id; f.modifiedAt = ts;
-            bpt.insert(fname, f); trie.insert(fname, id);
-            struct tm* ti = localtime(&ts);
-            if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+            bpt.insert(fullPath, f); trie.insert(fname, id);
+            segTree.addFile(computeDayIndex(ts), f.size);
             uf.addNode(id); uf.unite(id, parentId);
             allFileIds.push_back(id);
             count++; totalBytes += fileSize;
@@ -205,9 +226,8 @@ pair<int,long> loadDirectory(const string& dirPath, int parentId = 0) {
             int id = nextFileId++;
             FileNode f(fname, fullPath, parentId, fileSize, ts, false);
             f.id = id; f.modifiedAt = ts;
-            bpt.insert(fname, f); trie.insert(fname, id);
-            struct tm* ti = localtime(&ts);
-            if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+            bpt.insert(fullPath, f); trie.insert(fname, id);
+            segTree.addFile(computeDayIndex(ts), f.size);
             uf.addNode(id); uf.unite(id, parentId);
             allFileIds.push_back(id);
             count++; totalBytes += fileSize;
@@ -226,8 +246,8 @@ void performDeepAnalysis(vector<FileNode>& files) {
             deep.id = files[i].id;
             deep.modifiedAt = files[i].modifiedAt;
             files[i] = deep;
-            bpt.remove(deep.name);
-            bpt.insert(deep.name, deep);
+            bpt.remove(deep.path);
+            bpt.insert(deep.path, deep);
         }
     }
 }
@@ -271,9 +291,8 @@ void runMachineMode() {
                         FileNode f(fname, pdir + "/" + fname, parentId, sz, mt, false);
                         f.id = id; f.modifiedAt = mt;
                         f.trueType = ttype; f.entropy = ent;
-                        bpt.insert(fname, f); trie.insert(fname, id);
-                        struct tm* ti = localtime(&mt);
-                        if (ti) segTree.addFile(ti->tm_yday % 365, f.size);
+                        bpt.insert(pdir + "/" + fname, f); trie.insert(fname, id);
+                        segTree.addFile(computeDayIndex(mt), f.size);
                         uf.addNode(id); uf.unite(id, parentId);
                         pds.saveVersion(f); // Create baseline version
                         allFileIds.push_back(id);
@@ -326,11 +345,11 @@ void runMachineMode() {
             long long dupeWaste = 0;
             for (auto it = groups.begin(); it != groups.end(); ++it) 
                 if (it->second.size() > 1) dupeWaste += (long long)(it->second.size() - 1) * it->second[0].size;
-            if (dupeWaste > 500 * 1048576LL) cout << "WARN|DUPLICATES|Duplicate files wasting " << (dupeWaste / 1048576) << " MB" << endl;
+            if (dupeWaste > 500 * 1048576LL) cout << "WARN|DUPLICATES|Duplicate files wasting " << (dupeWaste / 1048576) << " MB|" << dupeWaste << endl;
             long long oldWaste = 0;
             long long twoYearsAgo = (long long)time(0) - (2LL * 365 * 86400);
             for (size_t i = 0; i < all.size(); i++) if ((long long)all[i].modifiedAt < twoYearsAgo) oldWaste += all[i].size;
-            if (oldWaste > 1024 * 1048576LL) cout << "WARN|OLD_FILES|Files >2yrs occupy " << (oldWaste / 1048576) << " MB" << endl;
+            if (oldWaste > 1024 * 1048576LL) cout << "WARN|OLD_FILES|Files >2yrs occupy " << (oldWaste / 1048576) << " MB|" << oldWaste << endl;
             cout << "WARNINGS_DONE" << endl << flush;
         }
         else if (cmd == "RECLAIM") {
@@ -357,7 +376,7 @@ void runMachineMode() {
                 pds.saveVersion(all[i]);
                 pds.backupFile(all[i]);
                 if (remove(all[i].path.c_str()) == 0) { 
-                    bpt.remove(all[i].name); 
+                    bpt.remove(all[i].path); 
                     trie.remove(all[i].name); 
                     cout << "DELETE_OK|" << fid << endl; 
                 }
@@ -375,7 +394,7 @@ void runMachineMode() {
                 for (size_t j = 0; j < all.size(); j++) {
                     if (all[j].id == orphans[i]) {
                         if (remove(all[j].path.c_str()) == 0) {
-                            bpt.remove(all[j].name); trie.remove(all[j].name);
+                            bpt.remove(all[j].path); trie.remove(all[j].name);
                             count++;
                         }
                         break;
@@ -426,12 +445,15 @@ void runMachineMode() {
             string path; getline(iss >> ws, path);
             if (path.empty()) { cout << "ERROR|LOAD_DIR|no path" << endl << flush; continue; }
             pair<int, long> res = loadDirectory(path);
+            // E-7: Initialize dense vectors for file ID range
+            if (nextFileId > 10000) uf.initDense(10000, nextFileId - 1);
             cout << "LOADED|" << res.first << "|" << res.second << endl << flush;
         }
         else if (cmd == "ROLLBACK") {
             int fid, ver; if (!(iss >> fid >> ver)) { cout << "ROLLBACK_ERROR|args" << endl << flush; continue; }
-            if (pds.rollback(fid, ver, bpt)) cout << "ROLLBACK_OK|" << fid << "|" << ver << endl << flush;
-            else cout << "ROLLBACK_ERROR|failed" << endl << flush;
+            // C-6: rollback() now prints ROLLBACK_OK or ROLLBACK_ERROR directly
+            pds.rollback(fid, ver, bpt);
+            cout << flush;
         }
         else if (cmd == "SEARCH") {
             string query; getline(iss >> ws, query);
@@ -497,32 +519,43 @@ void runMachineMode() {
                 if (it->second.size() > 1) {
                     count++; total += (long long)(it->second.size()-1) * it->second[0].size;
                     string paths = "";
-                    for(size_t j = 0; j < it->second.size(); j++) paths += safe(it->second[j].path) + ",";
+                    for(size_t j = 0; j < it->second.size(); j++) paths += safe(it->second[j].path) + ":" + to_string(it->second[j].id) + ",";
                     cout << "DUP|" << safe(it->second[0].name) << "|" << safe(it->first) << "|" << paths << "|" << it->second[0].size/1024 << endl;
                 }
             }
-            cout << "DUP_DONE|" << count << "|" << total/1048576.0 << endl << flush;
+            cout << "DUP_DONE|" << count << "|" << total/1048576.0 << "|FAST" << endl << flush;
         }
         else if (cmd == "ORPHANS") {
             vector<int> orphans = uf.findAllOrphans(0, allFileIds);
             vector<FileNode> all = bpt.getAllLeaves();
+            // H-4: Build id->node map for O(n) lookup instead of O(n^2)
+            unordered_map<int, const FileNode*> idToNode;
+            for (size_t i = 0; i < all.size(); i++) idToNode[all[i].id] = &all[i];
             long long total = 0;
             for (size_t i = 0; i < orphans.size(); i++) {
-                for (size_t j = 0; j < all.size(); j++) {
-                    if (all[j].id == orphans[i]) {
-                        cout << "ORPHAN|" << all[j].id << "|" << safe(all[j].name) << "|" << safe(all[j].path) << "|" << all[j].size/1024 << endl;
-                        total += all[j].size; break;
-                    }
+                auto it = idToNode.find(orphans[i]);
+                if (it != idToNode.end()) {
+                    const FileNode* f = it->second;
+                    cout << "ORPHAN|" << f->id << "|" << safe(f->name) << "|" << safe(f->path) << "|" << f->size/1024 << endl;
+                    total += f->size;
                 }
             }
             cout << "ORPHAN_DONE|" << (int)orphans.size() << "|" << total/1048576.0 << endl << flush;
         }
         else if (cmd == "ANALYTICS") {
+            // C-5: Use year-aware day offsets
+            time_t now = time(0);
+            struct tm tnow{};
+            safeLocaltime((long*)&now, &tnow);
+            int yearOffset = tnow.tm_year - 120;
+            if (yearOffset < 0) yearOffset = 0;
+            if (yearOffset > 9) yearOffset = 9;
+            int base = yearOffset * 365;
             for (int i = 0; i < 12; i++) {
                 const string months[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
                 const int starts[] = {0,31,59,90,120,151,181,212,243,273,304,334};
                 const int ends[] = {30,58,89,119,150,180,211,242,272,303,333,364};
-                cout << "MONTH|" << months[i] << "|" << fixed << setprecision(2) << segTree.queryRange(starts[i], ends[i])/1048576.0 << endl;
+                cout << "MONTH|" << months[i] << "|" << fixed << setprecision(2) << segTree.queryRange(base + starts[i], base + ends[i])/1048576.0 << endl;
             }
             cout << "ANALYTICS_DONE|0" << endl << flush;
         }

@@ -29,6 +29,9 @@ private:
     // Helper to recursively destroy the trie
     void destroyTrie(TrieNode* node);
 
+    // Helper to recursively remove a word and free empty nodes
+    bool removeHelper(TrieNode* node, const string& word, int depth);
+
 public:
     // Initializes root node
     Trie();

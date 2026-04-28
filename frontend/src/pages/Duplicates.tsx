@@ -14,7 +14,7 @@ interface DuplicateGroup {
     name: string;
     hash: string;
     sizeKB: number;
-    paths: string[];
+    paths: { path: string; id: number }[];
 }
 
 const Duplicates = () => {
@@ -51,10 +51,19 @@ const Duplicates = () => {
             }
             if (line.startsWith('DUP|')) {
                 const parts = line.split('|');
+                // E-6: Parse path:id format
+                const rawPaths = parts[3].split(',').filter(p => p);
+                const parsedPaths = rawPaths.map(entry => {
+                    const colonIdx = entry.lastIndexOf(':');
+                    if (colonIdx > 0) {
+                        return { path: entry.substring(0, colonIdx), id: parseInt(entry.substring(colonIdx + 1)) };
+                    }
+                    return { path: entry, id: -1 };
+                });
                 setDuplicateGroups(prev => [...prev, {
                     name: parts[1],
                     hash: parts[2],
-                    paths: parts[3].split(',').filter(p => p),
+                    paths: parsedPaths,
                     sizeKB: parseInt(parts[4])
                 }]);
             }
@@ -64,6 +73,17 @@ const Duplicates = () => {
         refresh();
         return () => unsub();
     }, [subscribe]);
+
+    // E-6: Delete a specific duplicate file
+    const handleDeleteDup = (fileId: number, groupIdx: number) => {
+        if (fileId < 0) return;
+        if (confirm('Delete this duplicate file permanently?')) {
+            sendCommand(`DELETE ${fileId}`, 'duplicates');
+            setDuplicateGroups(prev => prev.map((g, i) => 
+                i === groupIdx ? { ...g, paths: g.paths.filter(p => p.id !== fileId) } : g
+            ).filter(g => g.paths.length > 1));
+        }
+    };
 
     const refresh = () => {
         setLoading(true);
@@ -76,7 +96,7 @@ const Duplicates = () => {
     const downloadCSV = () => {
         const headers = ["Name", "Hash", "Size (KB)", "Path"];
         const rows = duplicateGroups.flatMap(g => 
-            g.paths.map(p => [g.name, g.hash, g.sizeKB.toString(), p])
+            g.paths.map(p => [g.name, g.hash, g.sizeKB.toString(), p.path])
         );
         
         const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
@@ -178,8 +198,11 @@ const Duplicates = () => {
                                 <div className="divide-y divide-outline-variant/5">
                                     {g.paths.map((p, j) => (
                                         <div key={j} className="px-4 py-2.5 flex justify-between items-center group/item hover:bg-primary/5 transition-colors">
-                                            <p className="text-[10px] text-on-surface-variant font-mono truncate flex-1">{p}</p>
-                                            <button className="p-1.5 text-outline-variant hover:text-error transition-colors opacity-0 group-hover/item:opacity-100">
+                                            <p className="text-[10px] text-on-surface-variant font-mono truncate flex-1">{p.path}</p>
+                                            <button 
+                                                onClick={() => handleDeleteDup(p.id, i)}
+                                                className="p-1.5 text-outline-variant hover:text-error transition-colors opacity-0 group-hover/item:opacity-100"
+                                            >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                             </button>
                                         </div>

@@ -37,4 +37,7 @@ public:
     // Physical backup logic
     bool backupFile(const FileNode& f);
     bool restoreFile(const FileNode& f, int version);
+
+    // C-6: Check if physical backup file exists on disk
+    bool physicalBackupAvailable(int fileId, int version);
 };

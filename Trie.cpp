@@ -76,24 +76,38 @@ vector<string> Trie::prefixSearch(string prefix) {
     return result; 
 }
 
-// 7. remove(filename)
+// 7. removeHelper(node, word, depth) — returns true if caller should delete this node
+bool Trie::removeHelper(TrieNode* node, const string& word, int depth) {
+    if (!node) return false;
+
+    if (depth == (int)word.size()) {
+        if (node->isEnd) {
+            node->isEnd = false;
+            node->fileId = -1;
+        }
+        // Node is deletable if it has no children
+        return node->children.empty();
+    }
+
+    char c = word[depth];
+    if (node->children.find(c) == node->children.end()) {
+        return false; // Not found
+    }
+
+    bool shouldDelete = removeHelper(node->children[c], word, depth + 1);
+    if (shouldDelete) {
+        delete node->children[c];
+        node->children.erase(c);
+        // This node is also deletable if it has no children and is not an end
+        return !node->isEnd && node->children.empty();
+    }
+    return false;
+}
+
+// 8. remove(filename) — public wrapper
 void Trie::remove(string filename) {
     if (!root) return;
-    TrieNode* curr = root;
-    
-    // Walk to last node of filename
-    for (char c : filename) {
-        if (curr->children.find(c) == curr->children.end()) {
-            return; // Not found: return silently (no crash, no error message)
-        }
-        curr = curr->children[c];
-    }
-    
-    // If found: set isEnd=false, fileId=-1
-    if (curr->isEnd) {
-        curr->isEnd = false;
-        curr->fileId = -1;
-    }
+    removeHelper(root, filename, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────

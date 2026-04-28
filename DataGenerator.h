@@ -9,6 +9,7 @@
 #include <ctime>
 #include <iostream>
 #include <vector>
+#include <algorithm>
 
 using namespace std;
 
@@ -48,10 +49,23 @@ void generateData(int n) {
         f.id = id;
         f.modifiedAt = createdAt;
 
-        int dayIndex = (createdAt / 86400) % 365;
+        int dayIndex = 0;
+        // C-5: Use year-aware day index
+        struct tm ti{};
+        time_t ct = (time_t)createdAt;
+        {
+            struct tm* tmp = localtime(&ct);
+            if (tmp) ti = *tmp;
+        }
+        {
+            int yearOff = ti.tm_year - 120;
+            if (yearOff < 0) yearOff = 0;
+            if (yearOff > 9) yearOff = 9;
+            dayIndex = yearOff * 365 + ti.tm_yday;
+        }
 
-        // Insert into ALL structures
-        bpt.insert(name, f);
+        // Insert into ALL structures — C-1: use path as BPT key
+        bpt.insert(path, f);
         trie.insert(name, f.id);
         segTree.addFile(dayIndex, f.size);
         uf.addNode(f.id);

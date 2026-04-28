@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, useRef } from 'react';
+import { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import type { ReactNode } from 'react';
 
 export type EngineState = 'IDLE' | 'SCANNING' | 'ERROR';
@@ -12,6 +12,7 @@ export interface DiskInfo {
 export interface Warning {
     type: string;
     message: string;
+    bytes?: number;  // M-1: raw bytes field
 }
 
 export interface WSMessage {
@@ -43,27 +44,53 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     
     const wsRef = useRef<WebSocket | null>(null);
     const subscribersRef = useRef<Map<string, Set<(line: string, eventType: string) => void>>>(new Map());
+    // M-6: Unique connection ID per session
+    const connIdRef = useRef<string>(crypto.randomUUID());
+    // E-8: Generation counter to discard stale subscriber callbacks
+    const genRef = useRef<number>(0);
+    // C-4: Reconnection state tracking
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isConnectingRef = useRef<boolean>(false);
 
     const clearWarnings = () => setWarnings([]);
 
     useEffect(() => {
+        genRef.current++;
+        const currentGen = genRef.current;
+
         const connect = () => {
+            // C-4: Prevent duplicate connection attempts
+            if (isConnectingRef.current) return;
+            if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) return;
+            isConnectingRef.current = true;
+
             const ws = new WebSocket('ws://localhost:8000/ws');
             
             ws.onopen = () => {
+                // E-8: Ignore if generation has moved on
+                if (genRef.current !== currentGen) { ws.close(); return; }
+                isConnectingRef.current = false;
                 setConnected(true);
                 if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ command: 'STATUS', tag: 'global_status' }));
-                    ws.send(JSON.stringify({ command: 'DISK_INFO', tag: 'dashboard' }));
+                    ws.send(JSON.stringify({ command: 'STATUS', tag: 'global_status', conn_id: connIdRef.current }));
+                    ws.send(JSON.stringify({ command: 'DISK_INFO', tag: 'dashboard', conn_id: connIdRef.current }));
                 }
             };
             
             ws.onclose = () => {
+                isConnectingRef.current = false;
+                // E-8: Ignore if generation has moved on
+                if (genRef.current !== currentGen) return;
                 setConnected(false);
-                setTimeout(connect, 3000); 
+                // C-4: Debounced reconnection — clear any existing timer first
+                if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = setTimeout(connect, 3000); 
             };
             
             ws.onmessage = (event) => {
+                // E-8: Discard messages from stale generations
+                if (genRef.current !== currentGen) return;
+
                 const message: WSMessage = JSON.parse(event.data);
                 const { event: evType, data } = message;
                 const { tag, line } = data;
@@ -74,6 +101,12 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                     const count = parseInt(parts[1], 10);
                     if (!isNaN(count)) setScanCount(count);
                     setProgress(p => Math.min(p + (Math.random() * 3), 90));
+                }
+
+                // E-4: Handle fatal engine errors
+                if (evType === 'engine_fatal') {
+                    setStatus('ERROR');
+                    return;
                 }
                 
                 if (evType === 'engine_stream') {
@@ -86,8 +119,8 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                         
                         // Request updates after scan
                         if (wsRef.current?.readyState === WebSocket.OPEN) {
-                            wsRef.current.send(JSON.stringify({ command: 'DISK_INFO', tag: 'dashboard' }));
-                            wsRef.current.send(JSON.stringify({ command: 'WARNINGS', tag: 'dashboard' }));
+                            wsRef.current.send(JSON.stringify({ command: 'DISK_INFO', tag: 'dashboard', conn_id: connIdRef.current }));
+                            wsRef.current.send(JSON.stringify({ command: 'WARNINGS', tag: 'dashboard', conn_id: connIdRef.current }));
                         }
                         setTimeout(() => setProgress(0), 1000);
                     }
@@ -101,9 +134,14 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                         });
                     }
 
+                    // M-1: Parse structured WARN with optional bytes field
                     if (line.startsWith('WARN|')) {
                         const parts = line.split('|');
-                        setWarnings(prev => [...prev, { type: parts[1], message: parts[2] }]);
+                        setWarnings(prev => [...prev, { 
+                            type: parts[1], 
+                            message: parts[2],
+                            bytes: parts[3] ? parseInt(parts[3]) : undefined
+                        }]);
                     }
 
                     if (line.startsWith('ERROR')) {
@@ -124,16 +162,21 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         };
         
         connect();
-        return () => { if (wsRef.current) wsRef.current.close(); };
+        return () => {
+            genRef.current++;
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            if (wsRef.current) wsRef.current.close();
+        };
     }, []);
 
-    const sendCommand = (cmd: string, tag: string = 'api_req') => {
+    const sendCommand = useCallback((cmd: string, tag: string = 'api_req') => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ command: cmd, tag }));
+            // M-6: Include conn_id in all commands
+            wsRef.current.send(JSON.stringify({ command: cmd, tag, conn_id: connIdRef.current }));
         }
-    };
+    }, []);
 
-    const subscribe = (tag: string, callback: (line: string, eventType: string) => void) => {
+    const subscribe = useCallback((tag: string, callback: (line: string, eventType: string) => void) => {
         const subs = subscribersRef.current;
         if (!subs.has(tag)) subs.set(tag, new Set());
         subs.get(tag)!.add(callback);
@@ -144,7 +187,7 @@ export const EngineProvider: React.FC<{ children: ReactNode }> = ({ children }) 
                 if (tagSet.size === 0) subs.delete(tag);
             }
         };
-    };
+    }, []);
 
     return (
         <EngineContext.Provider value={{

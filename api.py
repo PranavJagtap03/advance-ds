@@ -4,6 +4,8 @@ import subprocess
 import threading
 import sqlite3
 import asyncio
+import uuid
+import time as _time
 from typing import List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,20 +22,33 @@ app.add_middleware(
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        # M-6: Store (ws, conn_id) tuples
+        self.active_connections: List[tuple] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        conn_id = str(uuid.uuid4())
+        self.active_connections.append((websocket, conn_id))
+        return conn_id
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+        self.active_connections = [(ws, cid) for ws, cid in self.active_connections if ws is not websocket]
 
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
+    # M-6: Send to a specific connection by conn_id
+    async def send_to(self, conn_id: str, message: dict):
+        for ws, cid in self.active_connections:
+            if cid == conn_id:
+                try:
+                    await ws.send_json(message)
+                except Exception:
+                    pass
+                return
+
+    # M-6: Broadcast to all connections
+    async def broadcast_all(self, message: dict):
+        for ws, _ in self.active_connections:
             try:
-                await connection.send_json(message)
+                await ws.send_json(message)
             except Exception:
                 pass
 
@@ -42,6 +57,8 @@ loop = None
 
 class FileCache:
     def __init__(self):
+        # H-1: Thread-safe SQLite access
+        self._db_lock = threading.Lock()
         home = os.path.expanduser("~")
         idx_dir = os.path.join(home, ".fsm_index")
         os.makedirs(idx_dir, exist_ok=True)
@@ -50,42 +67,45 @@ class FileCache:
         self._init_db()
 
     def _init_db(self):
-        with self.conn:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS files (
-                    filepath TEXT PRIMARY KEY,
-                    filename TEXT,
-                    size INT,
-                    mtime INT,
-                    parent_dir TEXT,
-                    trueType TEXT,
-                    entropy REAL
-                )
-            """)
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON files(parent_dir)")
-            
-            # Migrations for existing databases
-            try:
-                self.conn.execute("ALTER TABLE files ADD COLUMN trueType TEXT DEFAULT 'DATA'")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                self.conn.execute("ALTER TABLE files ADD COLUMN entropy REAL DEFAULT 0.0")
-            except sqlite3.OperationalError:
-                pass
+        with self._db_lock:
+            with self.conn:
+                self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS files (
+                        filepath TEXT PRIMARY KEY,
+                        filename TEXT,
+                        size INT,
+                        mtime INT,
+                        parent_dir TEXT,
+                        trueType TEXT,
+                        entropy REAL
+                    )
+                """)
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent ON files(parent_dir)")
+                
+                # Migrations for existing databases
+                try:
+                    self.conn.execute("ALTER TABLE files ADD COLUMN trueType TEXT DEFAULT 'DATA'")
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    self.conn.execute("ALTER TABLE files ADD COLUMN entropy REAL DEFAULT 0.0")
+                except sqlite3.OperationalError:
+                    pass
 
     def save_scan_results(self, root_dir, files_list):
         # files_list items: (fname, path, sz, mt, ttype, ent)
-        with self.conn:
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO files (filepath, filename, size, mtime, parent_dir, trueType, entropy) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(fp, fname, sz, mt, os.path.dirname(fp), ttype, ent) for (fname, fp, sz, mt, ttype, ent) in files_list]
-            )
+        with self._db_lock:
+            with self.conn:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO files (filepath, filename, size, mtime, parent_dir, trueType, entropy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [(fp, fname, sz, mt, os.path.dirname(fp), ttype, ent) for (fname, fp, sz, mt, ttype, ent) in files_list]
+                )
 
     def load_all_batch(self, bridge):
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT filepath, filename, size, mtime, trueType, entropy FROM files")
-        rows = cursor.fetchall()
+        with self._db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT filepath, filename, size, mtime, trueType, entropy FROM files")
+            rows = cursor.fetchall()
         
         if not rows:
             return 0
@@ -112,15 +132,20 @@ class FileCache:
 class SubprocessBridge:
     TERMINATORS = {"DUP_DONE", "ORPHAN_DONE", "ANALYTICS_DONE",
                    "BENCH_DONE", "VERSION_DONE", "BYE", "BATCH_DONE", "REC_OK", "LOADED",
-                   "ROLLBACK_OK", "ROLLBACK_ERROR", "CACHE_DONE", "TYPE_DONE", "SUSPICIOUS_DONE"}
+                   "ROLLBACK_OK", "ROLLBACK_ERROR", "CACHE_DONE", "TYPE_DONE", "SUSPICIOUS_DONE",
+                   "RECLAIM_DONE"}  # H-6: Added RECLAIM_DONE
 
     def __init__(self):
         self.proc = None
         self._lock = threading.Lock()
         self.cache_buffer = []
+        # M-6: Pending command conn_id tracking
+        self.pending_commands = {}
+        # E-4: Restart tracking
+        self._restart_count = 0
+        self._restart_times = []
         self._start_process()
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
+        self._start_reader()
 
     def _start_process(self):
         binary = "fsm.exe" if sys.platform == "win32" else "./fsm"
@@ -141,21 +166,57 @@ class SubprocessBridge:
             cwd=ds_dir,
         )
 
-    def send(self, command: str, tag: str = "default"):
+    def _start_reader(self):
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
+
+    def send(self, command: str, tag: str = "default", conn_id: str = None):
         if not self.proc:
             print("Process not running")
             return
+        # M-6: Track conn_id for this tag
+        if conn_id and tag:
+            self.pending_commands[tag] = conn_id
         with self._lock:
             try:
                 self.proc.stdin.write(command + "\n")
                 self.proc.stdin.flush()
             except BrokenPipeError:
                 print("Broken pipe error, restarting process...")
-                self._start_process()
+                self._try_restart()
 
     def _broadcast_threadsafe(self, event: str, data: dict):
         if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(manager.broadcast({"event": event, "data": data}), loop)
+            asyncio.run_coroutine_threadsafe(manager.broadcast_all({"event": event, "data": data}), loop)
+
+    # H-2: Retry-safe cache flush
+    def _flush_cache_buffer(self):
+        retries = 0
+        while retries < 5:
+            if cache and self.cache_buffer:
+                cache.save_scan_results("root", self.cache_buffer)
+                self.cache_buffer = []
+                return
+            retries += 1
+            _time.sleep(0.1)
+        # After 5 retries, discard buffer
+        if self.cache_buffer:
+            print(f"WARNING: Discarding {len(self.cache_buffer)} cache items (cache not ready)")
+            self.cache_buffer = []
+
+    # E-4: Auto-restart with fatal cutoff
+    def _try_restart(self):
+        now = _time.time()
+        self._restart_times = [t for t in self._restart_times if now - t < 60]
+        if len(self._restart_times) >= 5:
+            print("FATAL: Engine crashed >5 times in 60s, stopping retries")
+            self._broadcast_threadsafe("engine_fatal", {"message": "Engine crashed repeatedly"})
+            return
+        self._restart_times.append(now)
+        _time.sleep(2)
+        self.cache_buffer = []  # E-4+H-2: Reset stale buffer
+        self._start_process()
+        self._start_reader()
 
     def _reader_loop(self):
         while True:
@@ -166,6 +227,7 @@ class SubprocessBridge:
             line = self.proc.stdout.readline()
             if not line:
                 print("Engine stdout closed")
+                self._try_restart()
                 break
             
             line = line.rstrip("\n\r")
@@ -187,9 +249,7 @@ class SubprocessBridge:
                 continue
 
             if prefix == "CACHE_DONE":
-                if cache and self.cache_buffer:
-                    cache.save_scan_results("root", self.cache_buffer)
-                    self.cache_buffer = []
+                self._flush_cache_buffer()
             
             target_tags = ["global", "api_req"]
             if prefix in ("DUP", "DUP_DONE"): target_tags.append("duplicates")
@@ -197,6 +257,9 @@ class SubprocessBridge:
             if prefix in ("MONTH", "ANALYTICS_DONE"): target_tags.append("analytics")
             if prefix in ("SUSPICIOUS", "SUSPICIOUS_DONE"): target_tags.append("security")
             if prefix in ("TYPE", "TYPE_DONE"): target_tags.append("analytics")
+            # H-6: Route RECLAIM responses to analytics
+            if prefix in ("REC", "RECLAIM_DONE"): target_tags.append("analytics")
+            if prefix in ("REC", "RECLAIM_DONE"): target_tags.append("duplicates")
             if prefix in ("RESULT"):
                 if len(parts) > 1 and parts[1] == "VERSION": target_tags.append("history")
                 else: target_tags.append("search")
@@ -230,25 +293,27 @@ async def startup_event():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    conn_id = await manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_json()
             cmd = data.get("command", "")
             tag = data.get("tag", "api_req")
+            client_conn_id = data.get("conn_id", conn_id)
             if cmd == "STATUS":
                 count = 0
                 if cache:
-                    cursor = cache.conn.cursor()
-                    cursor.execute("SELECT COUNT(*) FROM files")
-                    row = cursor.fetchone()
-                    if row: count = row[0]
+                    with cache._db_lock:
+                        cursor = cache.conn.cursor()
+                        cursor.execute("SELECT COUNT(*) FROM files")
+                        row = cursor.fetchone()
+                        if row: count = row[0]
                 await websocket.send_json({
                     "event": "engine_stream", 
                     "data": {"tag": tag, "line": f"INDEX_STATUS|{count}"}
                 })
             elif bridge:
-                bridge.send(cmd, tag)
+                bridge.send(cmd, tag, client_conn_id)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:

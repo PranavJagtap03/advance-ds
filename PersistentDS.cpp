@@ -36,6 +36,10 @@ bool PersistentDS::copyFile(const string& source, const string& destination) {
 void PersistentDS::saveVersion(FileNode& f) {
     f.version = (int)history[f.id].size() + 1;
     history[f.id].push_back(f);
+    // C-6: Automatically create physical backup if path is non-empty
+    if (!f.path.empty()) {
+        try { backupFile(f); } catch (...) { /* silently skip if file doesn't exist */ }
+    }
 }
 
 FileNode PersistentDS::getVersion(int fileId, int version) {
@@ -54,18 +58,23 @@ void PersistentDS::showHistory(int fileId) {
 
 bool PersistentDS::rollback(int fileId, int version, BPlusTree& bpt) {
     FileNode old = getVersion(fileId, version);
-    if (old.id == -1) { cout << "Rollback failed.\n"; return false; }
+    if (old.id == -1) { cout << "ROLLBACK_ERROR|failed" << endl; return false; }
     
-    // Restore physical file
-    if (!restoreFile(old, version)) {
-        cout << "Physical restoration failed.\n";
-        return false;
+    bool physicalOk = false;
+    // C-6: Check if physical backup exists before attempting restore
+    if (physicalBackupAvailable(fileId, version)) {
+        physicalOk = restoreFile(old, version);
     }
 
     FileNode current = history[fileId].back();
     bpt.remove(current.name);
     bpt.insert(old.name, old);
-    cout << "Successfully rolled back to version " << version << "\n";
+    
+    if (physicalOk) {
+        cout << "ROLLBACK_OK|" << fileId << "|" << version << endl;
+    } else {
+        cout << "ROLLBACK_OK|" << fileId << "|" << version << "|METADATA_ONLY" << endl;
+    }
     return true;
 }
 
@@ -82,4 +91,10 @@ bool PersistentDS::backupFile(const FileNode& f) {
 bool PersistentDS::restoreFile(const FileNode& f, int version) {
     string src = backupDir + "/" + to_string(f.id) + "_v" + to_string(version);
     return copyFile(src, f.path);
+}
+
+bool PersistentDS::physicalBackupAvailable(int fileId, int version) {
+    string path = backupDir + "/" + to_string(fileId) + "_v" + to_string(version);
+    ifstream test(path);
+    return test.good();
 }

@@ -111,8 +111,9 @@ struct FileNode {
                 }
             }
         } else if (!deepAnalysis) {
-            // Faster path: just use metadata
-            hashStr(name);
+            // Fast-path checksum: path+size+mtime. Content-level dedup requires deepAnalysis=true.
+            hashStr(path);
+            hashStr(to_string(size));
             hashStr(to_string(createdAt));
         } else {
             // Folder or empty file
