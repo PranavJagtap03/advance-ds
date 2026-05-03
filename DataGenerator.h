@@ -5,6 +5,7 @@
 #include "UnionFind.h"
 #include "SegmentTree.h"
 #include "PersistentDS.h"
+#include "Utils.h"
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
@@ -49,20 +50,8 @@ void generateData(int n) {
         f.id = id;
         f.modifiedAt = createdAt;
 
-        int dayIndex = 0;
-        // C-5: Use year-aware day index
-        struct tm ti{};
-        time_t ct = (time_t)createdAt;
-        {
-            struct tm* tmp = localtime(&ct);
-            if (tmp) ti = *tmp;
-        }
-        {
-            int yearOff = ti.tm_year - 120;
-            if (yearOff < 0) yearOff = 0;
-            if (yearOff > 9) yearOff = 9;
-            dayIndex = yearOff * 365 + ti.tm_yday;
-        }
+        // O-1: Use thread-safe computeDayIndex from Utils.h
+        int dayIndex = computeDayIndex((time_t)createdAt);
 
         // Insert into ALL structures — C-1: use path as BPT key
         bpt.insert(path, f);

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEngine } from '../contexts/EngineContext';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { TrendingUp, BarChart3, Clock, PieChart as PieChartIcon } from 'lucide-react';
@@ -21,52 +21,39 @@ const Analytics = () => {
     const [monthlyData, setMonthlyData] = useState<{ month: string, size: number }[]>([]);
     const [largeFiles, setLargeFiles] = useState<LargeFile[]>([]);
     const [typeData, setTypeData] = useState<TypeData[]>([]);
+    // E-8: Generation counter to discard stale subscriber callbacks
+    const genRef = useRef(0);
 
     useEffect(() => {
-        let rawMonths: { month: string, size: number }[] = [];
-        let files: LargeFile[] = [];
-        let types: TypeData[] = [];
-        
-        const unsub = subscribe('analytics', (line) => {
-            if (line.startsWith('MONTH|')) {
-                const parts = line.split('|');
-                rawMonths.push({ month: parts[1], size: parseFloat(parts[2]) });
-            } 
-            else if (line.startsWith('ANALYTICS_DONE')) {
-                setMonthlyData([...rawMonths]);
-            }
-            else if (line.startsWith('REC|LARGE_FILE|')) {
-                const parts = line.split('|');
-                files.push({
-                    name: parts[2],
-                    size: parseInt(parts[3]),
-                    path: parts[4]
-                });
-            }
-            else if (line.startsWith('RECLAIM_DONE')) {
-                setLargeFiles([...files].sort((a,b) => b.size - a.size).slice(0, 5));
-            }
-            else if (line.startsWith('TYPE|')) {
-                const parts = line.split('|');
-                types.push({ name: parts[1], value: parseInt(parts[2]) });
-            }
-            else if (line.startsWith('TYPE_DONE')) {
-                setTypeData([...types]);
-            }
-        });
+        loadAnalytics();
+    }, []);
 
-        refresh();
-        return () => unsub();
-    }, [subscribe]);
-
-    const refresh = () => {
+    const loadAnalytics = async () => {
         setMonthlyData([]);
         setLargeFiles([]);
         setTypeData([]);
-        sendCommand('ANALYTICS', 'analytics');
-        sendCommand('RECLAIM', 'analytics');
-        sendCommand('TYPE_DISTRIBUTION', 'analytics');
+        try {
+            const res = await fetch('http://localhost:8000/api/analytics');
+            const data = await res.json();
+            setMonthlyData(data.monthly.map((m: any) => ({
+                month: m.month,
+                size: m.size
+            })));
+            setLargeFiles(data.largest.map((f: any) => ({
+                name: f.name,
+                size: f.size,
+                path: f.path
+            })));
+            setTypeData(data.types.map((t: any) => ({
+                name: t.name,
+                value: t.value
+            })));
+        } catch(e) {
+            console.error('Failed to load analytics', e);
+        }
     };
+
+    const refresh = () => { loadAnalytics(); };
 
     const formatMB = (bytes: number) => (bytes / 1048576).toFixed(1) + ' MB';
 

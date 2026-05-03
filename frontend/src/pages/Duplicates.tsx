@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEngine } from '../contexts/EngineContext';
 import { Copy, Trash2, Zap, Download, FileWarning } from 'lucide-react';
 
@@ -19,13 +19,55 @@ interface DuplicateGroup {
 
 const Duplicates = () => {
     const { sendCommand, subscribe } = useEngine();
+    const [restLoaded, setRestLoaded] = useState(false);
     const [reclaimActions, setReclaimActions] = useState<ReclaimAction[]>([]);
     const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([]);
     const [totalReclaimable, setTotalReclaimable] = useState(0);
     const [loading, setLoading] = useState(false);
+    // E-8: Generation counter to discard stale subscriber callbacks
+    const genRef = useRef(0);
+    // C-2: Track dedup scan mode (FAST = metadata-only, DEEP = content-level)
+    const [dupMode, setDupMode] = useState<string>('');
 
     useEffect(() => {
+        const loadFromRest = async () => {
+            setLoading(true);
+            try {
+                const [dupRes, reclaimRes] = await Promise.all([
+                    fetch('http://localhost:8000/api/duplicates'),
+                    fetch('http://localhost:8000/api/reclaim')
+                ]);
+                const dupData = await dupRes.json();
+                const reclaimData = await reclaimRes.json();
+
+                setDuplicateGroups(dupData.groups.map((g: any) => ({
+                    name: g.name,
+                    hash: g.hash,
+                    sizeKB: g.sizeKB,
+                    paths: g.paths
+                })));
+                setTotalReclaimable(dupData.total_reclaimable);
+                setReclaimActions(reclaimData.actions.map((a: any) => ({
+                    type: a.type,
+                    label: a.label,
+                    size: a.size,
+                    path: a.path
+                })));
+                setRestLoaded(true);
+            } catch (e) {
+                console.error('REST load failed', e);
+            } finally {
+                setLoading(false);
+            }
+        };
+        loadFromRest();
+    }, []);
+
+    useEffect(() => {
+        const myGen = ++genRef.current;
         const unsub = subscribe('duplicates', (line) => {
+            // E-8: Discard stale callbacks
+            if (myGen !== genRef.current) return;
             if (line.startsWith('REC|')) {
                 const parts = line.split('|');
                 const type = parts[1] as any;
@@ -48,6 +90,11 @@ const Duplicates = () => {
                 const total = parseInt(line.split('|')[1]);
                 setTotalReclaimable(total);
                 setLoading(false);
+            }
+            // C-2: Parse DUP_DONE suffix for FAST/DEEP mode
+            if (line.startsWith('DUP_DONE')) {
+                const parts = line.split('|');
+                setDupMode(parts[3] || 'FAST');
             }
             if (line.startsWith('DUP|')) {
                 const parts = line.split('|');
@@ -74,23 +121,56 @@ const Duplicates = () => {
         return () => unsub();
     }, [subscribe]);
 
-    // E-6: Delete a specific duplicate file
+    // P-3: Inline two-step confirmation (replaces confirm())
+    const [pendingDelete, setPendingDelete] = useState<{id: number, groupIdx: number} | null>(null);
+
+    // E-6: Delete a specific duplicate file — P-3: first step shows confirmation
     const handleDeleteDup = (fileId: number, groupIdx: number) => {
         if (fileId < 0) return;
-        if (confirm('Delete this duplicate file permanently?')) {
-            sendCommand(`DELETE ${fileId}`, 'duplicates');
-            setDuplicateGroups(prev => prev.map((g, i) => 
-                i === groupIdx ? { ...g, paths: g.paths.filter(p => p.id !== fileId) } : g
-            ).filter(g => g.paths.length > 1));
-        }
+        setPendingDelete({ id: fileId, groupIdx });
     };
+    const confirmDelete = () => {
+        if (!pendingDelete) return;
+        sendCommand(`DELETE ${pendingDelete.id}`, 'duplicates');
+        setDuplicateGroups(prev =>
+            prev.map((g, i) => i === pendingDelete.groupIdx
+                ? { ...g, paths: g.paths.filter(p => p.id !== pendingDelete.id) }
+                : g
+            ).filter(g => g.paths.length > 1)
+        );
+        setPendingDelete(null);
+    };
+    const cancelDelete = () => setPendingDelete(null);
 
-    const refresh = () => {
+    const refresh = async () => {
         setLoading(true);
         setReclaimActions([]);
         setDuplicateGroups([]);
-        sendCommand('RECLAIM', 'duplicates');
-        sendCommand('DUPLICATES', 'duplicates');
+        try {
+            const [dupRes, reclaimRes] = await Promise.all([
+                fetch('http://localhost:8000/api/duplicates'),
+                fetch('http://localhost:8000/api/reclaim')
+            ]);
+            const dupData = await dupRes.json();
+            const reclaimData = await reclaimRes.json();
+            setDuplicateGroups(dupData.groups.map((g: any) => ({
+                name: g.name,
+                hash: g.hash,
+                sizeKB: g.sizeKB,
+                paths: g.paths
+            })));
+            setTotalReclaimable(dupData.total_reclaimable);
+            setReclaimActions(reclaimData.actions.map((a: any) => ({
+                type: a.type,
+                label: a.label,
+                size: a.size,
+                path: a.path
+            })));
+        } catch(e) {
+            console.error('Refresh failed', e);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const downloadCSV = () => {
@@ -185,6 +265,22 @@ const Duplicates = () => {
                     <h3 className="text-sm font-black text-outline uppercase tracking-widest flex items-center gap-2">
                         <Copy className="w-4 h-4 text-secondary" /> Duplicate Groups
                     </h3>
+                    {/* C-2: Show disclaimer when dedup was metadata-only */}
+                    {dupMode === 'FAST' && duplicateGroups.length > 0 && (
+                        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-bold px-4 py-2 rounded-xl">
+                            Deep content scan not run — results based on metadata only.
+                        </div>
+                    )}
+                    {/* P-3: Inline delete confirmation card */}
+                    {pendingDelete !== null && (
+                        <div className="bg-error/5 border border-error/20 p-5 rounded-2xl flex items-center justify-between shadow-sm">
+                            <p className="text-sm font-bold text-error">Delete this duplicate permanently? This cannot be undone.</p>
+                            <div className="flex gap-2">
+                                <button onClick={cancelDelete} className="px-4 py-2 rounded-xl text-xs font-bold bg-surface-container-high border border-outline-variant/20">CANCEL</button>
+                                <button onClick={confirmDelete} className="px-4 py-2 rounded-xl text-xs font-bold text-on-error bg-error hover:brightness-110 shadow-sm">DELETE</button>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex-1 overflow-auto space-y-4 custom-scrollbar pr-2">
                         {duplicateGroups.map((g, i) => (
                             <div key={i} className="bg-surface-container-lowest border border-outline-variant/10 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all">

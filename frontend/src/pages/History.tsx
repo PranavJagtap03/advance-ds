@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEngine } from '../contexts/EngineContext';
 import { History as HistoryIcon, RotateCcw, Camera, FileClock } from 'lucide-react';
 
@@ -19,6 +19,13 @@ const History = () => {
     const [loading, setLoading] = useState(false);
     // E-2: Inline rollback status
     const [rollbackStatus, setRollbackStatus] = useState<string | null>(null);
+    // E-2: Inline two-step confirmation (replaces confirm())
+    const [pendingRollback, setPendingRollback] = useState<number | null>(null);
+    // P-2: Ref to track current fileId for subscriber closure
+    const fileIdRef = useRef(fileId);
+
+    // P-2: Keep ref in sync with state
+    useEffect(() => { fileIdRef.current = fileId; }, [fileId]);
 
     useEffect(() => {
         const unsub = subscribe('history', (line) => {
@@ -55,20 +62,32 @@ const History = () => {
             }
         });
         return () => unsub();
-    }, [subscribe, fileId]);
+    }, [subscribe]); // P-2: Removed fileId from deps to prevent re-subscribe on keystroke
 
+    // P-2: Use ref so subscriber closure always has current value
     const fetchHistory = () => {
-        if (!fileId) return;
+        if (!fileIdRef.current) return;
         setLoading(true);
         setVersions([]);
-        sendCommand(`VERSION_HISTORY ${fileId}`, 'history');
+        sendCommand(`VERSION_HISTORY ${fileIdRef.current}`, 'history');
     };
 
+    // E-2: First click — show inline confirmation card
     const handleRollback = (ver: number) => {
-        if (confirm(`Roll back to version ${ver}? Current file will be overwritten.`)) {
-            setRollbackStatus(null);
-            sendCommand(`ROLLBACK ${fileId} ${ver}`, 'history');
-        }
+        setPendingRollback(ver);
+    };
+
+    // E-2: Confirm click — actually perform rollback
+    const confirmRollback = () => {
+        if (pendingRollback === null) return;
+        setRollbackStatus(null);
+        sendCommand(`ROLLBACK ${fileId} ${pendingRollback}`, 'history');
+        setPendingRollback(null);
+    };
+
+    // E-2: Cancel click — dismiss confirmation
+    const cancelRollback = () => {
+        setPendingRollback(null);
     };
 
     const handleSnapshot = () => {
@@ -115,6 +134,21 @@ const History = () => {
             {rollbackStatus && (
                 <div className={`p-4 rounded-2xl text-sm font-bold flex items-center gap-3 ${rollbackStatus.includes('failed') ? 'bg-error/10 text-error border border-error/20' : 'bg-green-50 text-green-700 border border-green-200'}`}>
                     {rollbackStatus}
+                    <button onClick={() => setRollbackStatus(null)} className="ml-auto text-xs opacity-60 hover:opacity-100">DISMISS</button>
+                </div>
+            )}
+
+            {/* E-2: Inline two-step confirmation card */}
+            {pendingRollback !== null && (
+                <div className="bg-amber-50 border border-amber-300 p-5 rounded-2xl flex items-center justify-between shadow-sm animate-in">
+                    <div className="flex items-center gap-3">
+                        <RotateCcw className="w-5 h-5 text-amber-600" />
+                        <p className="text-sm font-bold text-amber-800">Confirm rollback to v{pendingRollback}? Current file will be overwritten.</p>
+                    </div>
+                    <div className="flex gap-2">
+                        <button onClick={cancelRollback} className="px-4 py-2 rounded-xl text-xs font-bold text-on-surface-variant bg-surface-container-high hover:bg-surface-container-highest transition-all border border-outline-variant/20">CANCEL</button>
+                        <button onClick={confirmRollback} className="px-4 py-2 rounded-xl text-xs font-bold text-on-primary bg-primary hover:brightness-110 transition-all shadow-md">CONFIRM</button>
+                    </div>
                 </div>
             )}
 

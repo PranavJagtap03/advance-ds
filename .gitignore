@@ -40,3 +40,14 @@ project_codebase.txt
 
 # Experimental/Temp folders
 stitch_*/
+scratch/
+.fsm_backup/
+frontend/.vite/
+
+# Temporary and test files
+all_project_code_combined.txt
+api_log.txt
+snapshots.dat
+test_ws.js
+test_ws.py
+test_ws2.py

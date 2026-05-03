@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEngine } from '../contexts/EngineContext';
 import { ShieldAlert, AlertTriangle, Trash2, FileWarning, ShieldCheck } from 'lucide-react';
 
@@ -6,36 +6,40 @@ interface SuspiciousFile {
     name: string;
     path: string;
     entropy: string;
+    id: number;  // O-4: File ID for delete action
 }
 
 const Security = () => {
     const { sendCommand, subscribe, status } = useEngine();
     const [suspiciousFiles, setSuspiciousFiles] = useState<SuspiciousFile[]>([]);
     const [loading, setLoading] = useState(false);
+    // E-8: Generation counter to discard stale subscriber callbacks
+    const genRef = useRef(0);
 
     useEffect(() => {
-        const unsub = subscribe('security', (line) => {
-            if (line.startsWith('SUSPICIOUS|')) {
-                const parts = line.split('|');
-                setSuspiciousFiles(prev => [...prev, {
-                    name: parts[1],
-                    path: parts[2],
-                    entropy: parts[3]
-                }]);
-            } else if (line.startsWith('SUSPICIOUS_DONE')) {
-                setLoading(false);
-            }
-        });
+        loadSuspicious();
+    }, []);
 
-        refresh();
-        return () => unsub();
-    }, [subscribe]);
-
-    const refresh = () => {
+    const loadSuspicious = async () => {
         setLoading(true);
         setSuspiciousFiles([]);
-        sendCommand('SUSPICIOUS', 'security');
+        try {
+            const res = await fetch('http://localhost:8000/api/suspicious');
+            const data = await res.json();
+            setSuspiciousFiles(data.files.map((f: any) => ({
+                name: f.name,
+                path: f.path,
+                entropy: String(f.entropy),
+                id: f.id
+            })));
+        } catch(e) {
+            console.error('Failed to load suspicious files', e);
+        } finally {
+            setLoading(false);
+        }
     };
+
+    const refresh = () => { loadSuspicious(); };
 
     return (
         <div className="flex flex-col h-full gap-8">
@@ -87,7 +91,10 @@ const Security = () => {
                                 <p className="text-[10px] font-bold text-outline uppercase tracking-wider mb-0.5">ENTROPY</p>
                                 <p className="text-sm font-black text-amber-600">{file.entropy} <span className="text-[10px] text-outline font-normal">bits</span></p>
                             </div>
-                            <button className="p-2 text-outline-variant hover:text-error transition-colors">
+                            <button 
+                                onClick={() => { sendCommand(`DELETE ${file.id}`, 'security'); setSuspiciousFiles(prev => prev.filter(f => f.path !== file.path)); }}
+                                className="p-2 text-outline-variant hover:text-error transition-colors"
+                            >
                                 <Trash2 className="w-5 h-5" />
                             </button>
                         </div>

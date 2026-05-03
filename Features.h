@@ -6,6 +6,7 @@
 #include "SegmentTree.h"
 #include "PersistentDS.h"
 #include "DataGenerator.h"
+#include "Utils.h"
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
@@ -107,13 +108,23 @@ inline void storageAnalytics() {
     int startDays[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
     int endDays[12]   = {30, 58, 89, 119, 150, 180, 211, 242, 272, 303, 333, 364};
 
+    // P-4: Compute current year offset for proper segment tree querying
+    time_t now = time(nullptr);
+    struct tm tnow{};
+    safeLocaltime(&now, &tnow);
+    int yearOff = tnow.tm_year - 120;
+    if (yearOff < 0) yearOff = 0;
+    if (yearOff > 9) yearOff = 9;
+    int base = yearOff * 365;
+
     cout << "=== STORAGE ANALYTICS (by month) ===" << endl;
     cout << left << setw(12) << "Month" << " | " << setw(15) << "Storage Added" << " | Bar chart" << endl;
     cout << string(40, '-') << endl;
 
     double totalMB = 0;
     for (int i = 0; i < 12; i++) {
-        long bytes = segTree.queryRange(startDays[i], endDays[i]);
+        // P-4: Use year-aware offset for segment tree queries
+        long bytes = segTree.queryRange(base + startDays[i], base + endDays[i]);
         double mb = bytes / 1048576.0;
         totalMB += mb;
         int barLen = min((int)(mb / 10), 30);
@@ -145,9 +156,10 @@ inline void benchmark() {
     if (all.empty()) return;
 
     // TEST 1 — Search
+    // P-1: BPT search uses path keys after C-1
     auto start = high_resolution_clock::now();
     for (int i = 0; i < 1000; i++) {
-        bpt.search(all[rand() % all.size()].name);
+        bpt.search(all[rand() % all.size()].path);
     }
     auto end = high_resolution_clock::now();
     long bptSearchTime = duration_cast<microseconds>(end - start).count();
@@ -162,10 +174,10 @@ inline void benchmark() {
     end = high_resolution_clock::now();
     long linSearchTime = duration_cast<microseconds>(end - start).count();
 
-    // TEST 2 — Range search
+    // P-1: Range over path strings — results vary by filesystem
     start = high_resolution_clock::now();
     for (int i = 0; i < 100; i++) {
-        bpt.rangeSearch("a", "m");
+        bpt.rangeSearch("/a", "/z");
     }
     end = high_resolution_clock::now();
     long bptRangeTime = duration_cast<microseconds>(end - start).count();

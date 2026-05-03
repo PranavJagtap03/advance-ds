@@ -130,10 +130,12 @@ inline QueryResult classify(const string& query) {
                     long minKB = stol(rest.substr(0, dashPos));
                     long maxKB = stol(rest.substr(dashPos + 1));
                     res.type    = SIZE_RANGE;
-                    res.dsName  = "SegmentTree";
+                    res.dsName  = "BPlusTree";
                     res.minSize = minKB * 1024; // convert to bytes
                     res.maxSize = maxKB * 1024;
-                    res.reason  = "Segment Tree supports O(log n) range queries over file sizes indexed by day; size filter can be applied on results.";
+                    res.reason  = "B+ Tree secondary sizeIndex (sorted vector of {size, path} pairs) "
+                                  "enables O(log n) size range queries via lower_bound/upper_bound. "
+                                  "SegmentTree handles date-range analytics only.";
                     return res;
                 } catch (...) {
                     // fall through to UNKNOWN

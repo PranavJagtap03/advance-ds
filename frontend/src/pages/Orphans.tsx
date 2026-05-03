@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEngine } from '../contexts/EngineContext';
 import { Ghost, Link2Off, Trash2, FolderSync, AlertCircle } from 'lucide-react';
 
@@ -14,46 +14,55 @@ const Orphans = () => {
     const [links, setLinks] = useState<BrokenLink[]>([]);
     const [totalWastedMB, setTotalWastedMB] = useState(0);
     const [loading, setLoading] = useState(false);
+    // E-8: Generation counter to discard stale subscriber callbacks
+    const genRef = useRef(0);
+    // Inline two-step confirmation for delete-all (replaces confirm())
+    const [pendingDeleteAll, setPendingDeleteAll] = useState(false);
 
     useEffect(() => {
-        let items: BrokenLink[] = [];
-        const unsub = subscribe('orphans', (line) => {
-            if (line.startsWith('ORPHAN|')) {
-                const parts = line.split('|');
-                items.push({
-                    id: parseInt(parts[1]),
-                    name: parts[2],
-                    path: parts[3],
-                    sizeKB: parseInt(parts[4])
-                });
-            }
-            if (line.startsWith('ORPHAN_DONE')) {
-                const parts = line.split('|');
-                setLinks([...items]);
-                setTotalWastedMB(parseFloat(parts[2]));
-                setLoading(false);
-            }
-        });
-        refresh();
-        return () => unsub();
-    }, [subscribe]);
+        loadOrphans();
+    }, []);
 
-    const refresh = () => {
+    const loadOrphans = async () => {
         setLoading(true);
         setLinks([]);
-        sendCommand('ORPHANS', 'orphans');
+        setPendingDeleteAll(false);
+        try {
+            const res = await fetch('http://localhost:8000/api/orphans');
+            const data = await res.json();
+            setLinks(data.files.map((f: any) => ({
+                id: f.id,
+                name: f.name,
+                path: f.path,
+                sizeKB: f.sizeKB
+            })));
+            setTotalWastedMB(data.total_wasted_mb);
+        } catch(e) {
+            console.error('Failed to load orphans', e);
+        } finally {
+            setLoading(false);
+        }
     };
+
+    const refresh = () => { loadOrphans(); };
 
     const handleDelete = (id: number) => {
         sendCommand(`DELETE ${id}`, 'orphans');
         setLinks(prev => prev.filter(l => l.id !== id));
     };
 
-    const handleDeleteAll = () => {
-        if (confirm(`Are you sure you want to delete all ${links.length} orphan files?`)) {
-            sendCommand('DELETE_ORPHANS', 'orphans');
-            setLinks([]);
-        }
+    const handleDeleteAllClick = () => {
+        setPendingDeleteAll(true);
+    };
+
+    const confirmDeleteAll = () => {
+        sendCommand('DELETE_ORPHANS', 'orphans');
+        setLinks([]);
+        setPendingDeleteAll(false);
+    };
+
+    const cancelDeleteAll = () => {
+        setPendingDeleteAll(false);
     };
 
     return (
@@ -66,9 +75,9 @@ const Orphans = () => {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    {links.length > 0 && (
+                    {links.length > 0 && !pendingDeleteAll && (
                         <button 
-                            onClick={handleDeleteAll}
+                            onClick={handleDeleteAllClick}
                             className="bg-error text-on-error px-6 py-2.5 rounded-xl font-bold hover:brightness-110 active:scale-95 transition-all shadow-md flex items-center gap-2"
                         >
                             <Trash2 className="w-4 h-4" />
@@ -85,6 +94,19 @@ const Orphans = () => {
                     </button>
                 </div>
             </header>
+
+            {/* Inline two-step delete-all confirmation */}
+            {pendingDeleteAll && (
+                <div className="bg-error/5 border border-error/20 p-5 rounded-2xl flex items-center justify-between shadow-sm">
+                    <p className="text-sm font-bold text-error">
+                        Delete all {links.length} orphan files permanently? This cannot be undone.
+                    </p>
+                    <div className="flex gap-2">
+                        <button onClick={cancelDeleteAll} className="px-4 py-2 rounded-xl text-xs font-bold bg-surface-container-high border border-outline-variant/20">CANCEL</button>
+                        <button onClick={confirmDeleteAll} className="px-4 py-2 rounded-xl text-xs font-bold text-on-error bg-error hover:brightness-110 shadow-sm">CONFIRM DELETE ALL</button>
+                    </div>
+                </div>
+            )}
 
             {links.length > 0 ? (
                 <>
@@ -120,7 +142,10 @@ const Orphans = () => {
                                         <p className="text-xs font-black text-on-surface-variant">{link.sizeKB} KB</p>
                                     </div>
                                     <div className="flex gap-2">
-                                        <button className="text-xs font-bold text-primary hover:underline px-3 py-1.5">RECOVER</button>
+                                        <button 
+                                            onClick={() => setLinks(prev => prev.filter(l => l.id !== link.id))}
+                                            className="text-xs font-bold text-primary hover:underline px-3 py-1.5"
+                                        >IGNORE</button>
                                         <button 
                                             onClick={() => handleDelete(link.id)}
                                             className="text-xs font-bold text-on-error bg-error hover:brightness-110 px-4 py-1.5 rounded-lg transition-all shadow-sm"

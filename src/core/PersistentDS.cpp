@@ -75,6 +75,12 @@ bool PersistentDS::rollback(int fileId, int version, BPlusTree& bpt) {
         bpt.insert(old.path, old);
     }
     
+    // FIX: Append the restored version as a NEW version entry in history
+    // so that history stays consistent and a second rollback works correctly
+    FileNode restored = old;
+    restored.version = (int)history[fileId].size() + 1;
+    history[fileId].push_back(restored);
+    
     if (physicalOk) {
         cout << "ROLLBACK_OK|" << fileId << "|" << version << endl;
     } else {

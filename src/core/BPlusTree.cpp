@@ -267,31 +267,67 @@ void BPlusTree::removeHelper(BPlusNode* node, BPlusNode* parent, int childIndex,
 
     if (leftSib && (int)leftSib->keys.size() > childMin) {
         // Borrow from left sibling
-        child->keys.insert(child->keys.begin(), leftSib->keys.back());
-        child->values.insert(child->values.begin(), leftSib->values.back());
-        leftSib->keys.pop_back();
-        leftSib->values.pop_back();
-        node->keys[i - 1] = child->keys[0];
+        if (child->isLeaf) {
+            // Leaf borrow: move last key/value from left sibling
+            child->keys.insert(child->keys.begin(), leftSib->keys.back());
+            child->values.insert(child->values.begin(), leftSib->values.back());
+            leftSib->keys.pop_back();
+            leftSib->values.pop_back();
+            node->keys[i - 1] = child->keys[0];
+        } else {
+            // Internal borrow: pull separator down, push left sibling's last key up
+            child->keys.insert(child->keys.begin(), node->keys[i - 1]);
+            child->children.insert(child->children.begin(), leftSib->children.back());
+            leftSib->children.pop_back();
+            node->keys[i - 1] = leftSib->keys.back();
+            leftSib->keys.pop_back();
+        }
     } else if (rightSib && (int)rightSib->keys.size() > childMin) {
-        // Borrow from right sibling — M-2: update parent key AFTER erase
-        child->keys.push_back(rightSib->keys.front());
-        child->values.push_back(rightSib->values.front());
-        rightSib->keys.erase(rightSib->keys.begin());
-        rightSib->values.erase(rightSib->values.begin());
-        node->keys[i] = rightSib->keys[0]; // M-2: correctly uses new first key
+        // Borrow from right sibling
+        if (child->isLeaf) {
+            // Leaf borrow: move first key/value from right sibling — M-2: update parent key AFTER erase
+            child->keys.push_back(rightSib->keys.front());
+            child->values.push_back(rightSib->values.front());
+            rightSib->keys.erase(rightSib->keys.begin());
+            rightSib->values.erase(rightSib->values.begin());
+            node->keys[i] = rightSib->keys[0]; // M-2: correctly uses new first key
+        } else {
+            // Internal borrow: pull separator down, push right sibling's first key up
+            child->keys.push_back(node->keys[i]);
+            child->children.push_back(rightSib->children.front());
+            rightSib->children.erase(rightSib->children.begin());
+            node->keys[i] = rightSib->keys.front();
+            rightSib->keys.erase(rightSib->keys.begin());
+        }
     } else if (leftSib) {
         // Merge with left sibling
-        leftSib->keys.insert(leftSib->keys.end(), child->keys.begin(), child->keys.end());
-        leftSib->values.insert(leftSib->values.end(), child->values.begin(), child->values.end());
-        leftSib->next = child->next;
+        if (child->isLeaf) {
+            // Leaf merge: append child's keys/values to left sibling
+            leftSib->keys.insert(leftSib->keys.end(), child->keys.begin(), child->keys.end());
+            leftSib->values.insert(leftSib->values.end(), child->values.begin(), child->values.end());
+            leftSib->next = child->next;
+        } else {
+            // Internal merge: pull down separator, then append child's keys and children
+            leftSib->keys.push_back(node->keys[i - 1]);
+            leftSib->keys.insert(leftSib->keys.end(), child->keys.begin(), child->keys.end());
+            leftSib->children.insert(leftSib->children.end(), child->children.begin(), child->children.end());
+        }
         node->keys.erase(node->keys.begin() + i - 1);
         node->children.erase(node->children.begin() + i);
         delete child;
     } else if (rightSib) {
         // Merge with right sibling
-        child->keys.insert(child->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
-        child->values.insert(child->values.end(), rightSib->values.begin(), rightSib->values.end());
-        child->next = rightSib->next;
+        if (child->isLeaf) {
+            // Leaf merge: append right sibling's keys/values to child
+            child->keys.insert(child->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
+            child->values.insert(child->values.end(), rightSib->values.begin(), rightSib->values.end());
+            child->next = rightSib->next;
+        } else {
+            // Internal merge: pull down separator, then append right sibling's keys and children
+            child->keys.push_back(node->keys[i]);
+            child->keys.insert(child->keys.end(), rightSib->keys.begin(), rightSib->keys.end());
+            child->children.insert(child->children.end(), rightSib->children.begin(), rightSib->children.end());
+        }
         node->keys.erase(node->keys.begin() + i);
         node->children.erase(node->children.begin() + i + 1);
         delete rightSib;

@@ -6,10 +6,30 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 const COLORS = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const Dashboard = () => {
-    const { status, scanCount, diskInfo, warnings, sendCommand, subscribe, clearWarnings } = useEngine();
+    const { 
+        status, 
+        scanCount,          // DB-confirmed total
+        sessionScanned,     // NEW — current scan session file count
+        currentFolder,      // NEW — current folder being scanned
+        diskInfo, 
+        warnings, 
+        sendCommand, 
+        subscribe, 
+        clearWarnings 
+    } = useEngine();
+    
     const [scanPath, setScanPath] = useState('');
     const [typeData, setTypeData] = useState<{ name: string, value: number }[]>([]);
     const [suspiciousCount, setSuspiciousCount] = useState(0);
+
+    const shortenPath = (path: string, maxLen = 48): string => {
+        if (path.length <= maxLen) return path;
+        const sep = path.includes('\\') ? '\\' : '/';
+        const parts = path.split(sep);
+        if (parts.length <= 2) return '...' + path.slice(-(maxLen - 3));
+        return parts[0] + sep + '...' + sep + 
+               parts[parts.length - 2] + sep + parts[parts.length - 1];
+    };
 
     useEffect(() => {
         let rawTypes: { name: string, value: number }[] = [];
@@ -33,9 +53,13 @@ const Dashboard = () => {
     }, [subscribe, status, scanCount, sendCommand]);
 
     const handleScan = () => {
+        console.log('[UI] Analyze button clicked. Path:', scanPath);
         if(scanPath) {
             clearWarnings();
-            sendCommand(`LOAD_DIR ${scanPath}`, 'explorer');
+            console.log('[UI] Sending SCAN_PARALLEL command...');
+            sendCommand(`SCAN_PARALLEL ${scanPath}`, 'dashboard');
+        } else {
+            console.warn('[UI] Analyze clicked but path is empty.');
         }
     };
 
@@ -47,15 +71,9 @@ const Dashboard = () => {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     };
 
-    const calculateWaste = () => {
-        if (!warnings || warnings.length === 0) return '0 MB';
-        let total = 0;
-        warnings.forEach(w => {
-            const match = w.message.match(/(\d+)\s+MB/);
-            if (match) total += parseInt(match[1]);
-        });
-        return total > 0 ? `${total} MB` : '0 MB';
-    };
+    // M-1: Sum structured warn.bytes directly instead of regex parsing
+    const totalWasteBytes = warnings.reduce((s, w) => s + (w.bytes || 0), 0);
+    const wasteDisplay = totalWasteBytes > 0 ? `${(totalWasteBytes / 1048576).toFixed(1)} MB` : '0 MB';
 
     return (
         <div className="flex flex-col gap-6">
@@ -183,35 +201,78 @@ const Dashboard = () => {
 
             {/* Metrics Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* CARD 1 - Total Indexed */}
                 <div className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-md flex items-center gap-5 hover:border-primary/30 transition-colors">
                     <div className="p-4 bg-primary/10 rounded-full text-primary">
                         <Database className="w-6 h-6" />
                     </div>
                     <div>
-                        <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Indexed Files</p>
+                        <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Total Indexed</p>
                         <h4 className="text-2xl font-black text-on-surface">{scanCount.toLocaleString()}</h4>
+                        <p className="text-[10px] text-on-surface-variant mt-1">files in database</p>
                     </div>
                 </div>
 
+                {/* CARD 2 - Session Scan Counter */}
                 <div className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-md flex items-center gap-5 hover:border-primary/30 transition-colors">
-                    <div className="p-4 bg-secondary/10 rounded-full text-secondary">
+                    <div className={`p-4 rounded-full ${status === 'SCANNING' ? 'bg-green-500/10 text-green-600' : 'bg-secondary/10 text-secondary'}`}>
                         <LayoutGrid className="w-6 h-6" />
                     </div>
                     <div>
-                        <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Library Size</p>
-                        <h4 className="text-2xl font-black text-on-surface">{diskInfo ? formatBytes(diskInfo.indexed) : '--'}</h4>
+                        <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1 flex items-center">
+                            {status === 'SCANNING' ? 'Scanning Now' : 'Last Scan'}
+                            {status === 'SCANNING' && (
+                                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse inline-block ml-2" />
+                            )}
+                        </p>
+                        <h4 className="text-2xl font-black text-on-surface">{sessionScanned.toLocaleString()}</h4>
+                        <p className="text-[10px] text-on-surface-variant mt-1">
+                            {status === 'SCANNING' ? 'files found this session' : 'files found last session'}
+                        </p>
                     </div>
                 </div>
 
-                <div className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-md flex items-center gap-5 hover:border-primary/30 transition-colors">
-                    <div className="p-4 bg-error/10 rounded-full text-error">
-                        <AlertTriangle className="w-6 h-6" />
+                {/* CARD 3 - Conditional Display (Current Folder or Potential Waste) */}
+                {status === 'SCANNING' && currentFolder ? (
+                    <div className={`bg-surface-container-lowest p-6 rounded-xl border shadow-md flex flex-col justify-center transition-colors ${
+                        currentFolder.status === 'entering' ? 'border-primary/30' : 'border-green-500/30'
+                    }`}>
+                        <div className="flex items-center gap-2 mb-2">
+                            <span className={`w-2 h-2 rounded-full ${
+                                currentFolder.status === 'entering' ? 'bg-primary animate-pulse' : 'bg-green-500'
+                            }`} />
+                            <span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">
+                                {currentFolder.status === 'entering' ? 'Scanning Folder' : 'Folder Complete'}
+                            </span>
+                        </div>
+                        <div 
+                            className="font-mono text-xs text-primary font-bold truncate mb-1" 
+                            title={currentFolder.path}
+                        >
+                            {shortenPath(currentFolder.path)}
+                        </div>
+                        
+                        {currentFolder.status === 'done' ? (
+                            <div className="text-[10px] text-on-surface-variant">
+                                {currentFolder.filesFound.toLocaleString()} files found
+                            </div>
+                        ) : (
+                            <div className="w-full h-1 bg-surface-container-high rounded-full overflow-hidden mt-2">
+                                <div className="h-full w-1/3 bg-primary rounded-full animate-[shimmer_1.5s_ease-in-out_infinite]" />
+                            </div>
+                        )}
                     </div>
-                    <div>
-                        <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Potential Waste</p>
-                        <h4 className="text-2xl font-black text-on-surface">{calculateWaste()}</h4>
+                ) : (
+                    <div className="bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-md flex items-center gap-5 hover:border-primary/30 transition-colors">
+                        <div className="p-4 bg-error/10 rounded-full text-error">
+                            <AlertTriangle className="w-6 h-6" />
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-1">Potential Waste</p>
+                            <h4 className="text-2xl font-black text-on-surface">{wasteDisplay}</h4>
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
         </div>
     );
