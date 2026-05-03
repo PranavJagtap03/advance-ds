@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
-import { useEngine } from '../contexts/EngineContext';
+import { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { TrendingUp, BarChart3, Clock, PieChart as PieChartIcon } from 'lucide-react';
 
@@ -17,16 +16,9 @@ interface TypeData {
 const COLORS = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
 const Analytics = () => {
-    const { sendCommand, subscribe } = useEngine();
     const [monthlyData, setMonthlyData] = useState<{ month: string, size: number }[]>([]);
     const [largeFiles, setLargeFiles] = useState<LargeFile[]>([]);
     const [typeData, setTypeData] = useState<TypeData[]>([]);
-    // E-8: Generation counter to discard stale subscriber callbacks
-    const genRef = useRef(0);
-
-    useEffect(() => {
-        loadAnalytics();
-    }, []);
 
     const loadAnalytics = async () => {
         setMonthlyData([]);
@@ -35,16 +27,16 @@ const Analytics = () => {
         try {
             const res = await fetch('http://localhost:8000/api/analytics');
             const data = await res.json();
-            setMonthlyData(data.monthly.map((m: any) => ({
+            setMonthlyData(data.monthly.map((m: {month: string, size: number}) => ({
                 month: m.month,
                 size: m.size
             })));
-            setLargeFiles(data.largest.map((f: any) => ({
+            setLargeFiles(data.largest.map((f: {name: string, size: number, path: string}) => ({
                 name: f.name,
                 size: f.size,
                 path: f.path
             })));
-            setTypeData(data.types.map((t: any) => ({
+            setTypeData(data.types.map((t: {name: string, value: number}) => ({
                 name: t.name,
                 value: t.value
             })));
@@ -52,6 +44,11 @@ const Analytics = () => {
             console.error('Failed to load analytics', e);
         }
     };
+
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        loadAnalytics();
+    }, []);
 
     const refresh = () => { loadAnalytics(); };
 
@@ -100,7 +97,7 @@ const Analytics = () => {
                                     contentStyle={{backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e5eeff', boxShadow: '0 8px 30px rgba(0,0,0,0.08)', padding: '12px'}}
                                     labelStyle={{fontWeight: 800, marginBottom: '4px', fontSize: '12px'}}
                                     itemStyle={{color: '#4f46e5', fontWeight: 700, fontSize: '12px'}}
-                                    formatter={(value: any) => [`${value} MB`, 'Storage Added']}
+                                    formatter={(value: number) => [`${value} MB`, 'Storage Added']}
                                 />
                                 <Area type="monotone" dataKey="size" stroke="#4f46e5" strokeWidth={4} fillOpacity={1} fill="url(#growthGradient)" />
                             </AreaChart>
@@ -155,7 +152,7 @@ const Analytics = () => {
                                     ))}
                                 </Pie>
                                 <Tooltip 
-                                    formatter={(value: any) => formatMB(value)}
+                                    formatter={(value: number) => formatMB(value)}
                                     contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}}
                                 />
                             </PieChart>
