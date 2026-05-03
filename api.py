@@ -780,6 +780,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     "event": "engine_stream",
                     "data": {"tag": tag, "line": f"INDEX_STATUS|{count}"}
                 })
+            elif (cmd.startswith("SEARCH ") or cmd.startswith("PREFIX ")) and cache:
+                # Optimized Search: Use SQLite FTS5 directly for instant results
+                query = cmd.split(" ", 1)[1]
+                results = cache.search_fts(query)
+                for r in results:
+                    # Format: RESULT|FOUND|filename|path|sizeKB|Source|Path|0|SearchType
+                    msg = f"RESULT|FOUND|{r[1]}|{r[0]}|{r[2]//1024}|Index|{r[0]}|0|FTS"
+                    await websocket.send_json({
+                        "event": "engine_stream", 
+                        "data": {"tag": tag, "line": msg}
+                    })
+                if not results:
+                    await websocket.send_json({
+                        "event": "engine_stream",
+                        "data": {"tag": tag, "line": f"RESULT|NOT_FOUND|{query}"}
+                    })
             elif bridge:
                 asyncio.create_task(asyncio.to_thread(bridge.send, cmd, tag, client_conn_id))
     except WebSocketDisconnect:
